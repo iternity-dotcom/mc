@@ -19,10 +19,8 @@ package cmd
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math"
-	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -33,7 +31,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/minio/cli"
 	json "github.com/minio/colorjson"
-	"github.com/minio/madmin-go"
+	"github.com/minio/madmin-go/v3"
 	"github.com/minio/mc/pkg/probe"
 	"github.com/minio/pkg/console"
 )
@@ -46,6 +44,10 @@ var pingFlags = []cli.Flag{
 	cli.IntFlag{
 		Name:  "error-count, e",
 		Usage: "exit after N consecutive ping errors",
+	},
+	cli.BoolFlag{
+		Name:  "exit, x",
+		Usage: "exit when server(s) responds and reports being online",
 	},
 	cli.IntFlag{
 		Name:  "interval, i",
@@ -141,16 +143,9 @@ func (pr PingResult) String() string {
 	return s.String()
 }
 
-// Endpoint - container to hold server info
-type Endpoint struct {
-	Scheme string `json:"scheme"`
-	Host   string `json:"host"`
-	Port   string `json:"port"`
-}
-
 // EndPointStats - container to hold server ping stats
 type EndPointStats struct {
-	Endpoint  Endpoint `json:"endpoint"`
+	Endpoint  *url.URL `json:"endpoint"`
 	Min       string   `json:"min"`
 	Max       string   `json:"max"`
 	Average   string   `json:"average"`
@@ -212,13 +207,14 @@ func ping(ctx context.Context, cliCtx *cli.Context, anonClient *madmin.Anonymous
 	if cliCtx.Bool("distributed") {
 		servers = admInfo.Servers
 	}
+	allOK := true
 
 	for result := range anonClient.Alive(ctx, madmin.AliveOpts{}, servers...) {
-		host, port, _ := extractHostPort(result.Endpoint.String())
-		endPoint := Endpoint{result.Endpoint.Scheme, host, port}
-		stat := getPingInfo(cliCtx, result, endPointMap)
+		stat := pingStats(cliCtx, result, endPointMap)
+
+		allOK = allOK && result.Online
 		endPointStat := EndPointStats{
-			Endpoint:  endPoint,
+			Endpoint:  result.Endpoint,
 			Min:       trimToTwoDecimal(time.Duration(stat.min)),
 			Max:       trimToTwoDecimal(time.Duration(stat.max)),
 			Average:   trimToTwoDecimal(time.Duration(stat.avg)),
@@ -231,13 +227,16 @@ func ping(ctx context.Context, cliCtx *cli.Context, anonClient *madmin.Anonymous
 		endPointMap[result.Endpoint.Host] = stat
 
 	}
+	stop = stop || cliCtx.Bool("exit") && allOK
+
 	printMsg(PingResult{
 		Status:         "success",
 		Counter:        pad(strconv.Itoa(index), " ", 3-len(strconv.Itoa(index)), true),
 		EndPointsStats: endPointStats,
 	})
-
-	time.Sleep(time.Duration(cliCtx.Int("interval")) * time.Second)
+	if !stop {
+		time.Sleep(time.Duration(cliCtx.Int("interval")) * time.Second)
+	}
 }
 
 func trimToTwoDecimal(d time.Duration) string {
@@ -281,7 +280,7 @@ func pad(s, p string, count int, left bool) string {
 	return string(ret)
 }
 
-func getPingInfo(cliCtx *cli.Context, result madmin.AliveResult, serverMap map[string]serverStats) serverStats {
+func pingStats(cliCtx *cli.Context, result madmin.AliveResult, serverMap map[string]serverStats) serverStats {
 	var errorString string
 	var sum, avg, dns uint64
 	min := uint64(math.MaxUint64)
@@ -331,43 +330,6 @@ func getPingInfo(cliCtx *cli.Context, result madmin.AliveResult, serverMap map[s
 		dns = uint64(result.DNSResolveTime.Nanoseconds())
 	}
 	return serverStats{min, max, sum, avg, dns, errorCount, errorString, counter}
-}
-
-// extractHostPort - extracts host/port from many address formats
-// such as, ":9000", "localhost:9000", "http://localhost:9000/"
-func extractHostPort(hostAddr string) (string, string, error) {
-	var addr string
-
-	if hostAddr == "" {
-		return "", "", errors.New("unable to process empty address")
-	}
-
-	// Simplify the work of url.Parse() and always send a url with
-	if !strings.HasPrefix(hostAddr, "http://") && !strings.HasPrefix(hostAddr, "https://") {
-		hostAddr = "//" + hostAddr
-	}
-
-	// Parse address to extract host and scheme field
-	u, err := url.Parse(hostAddr)
-	if err != nil {
-		return "", "", err
-	}
-
-	addr = u.Host
-	// At this point, addr can be one of the following form:
-	//  ":9000"
-	//  "localhost:9000"
-	//  "localhost" <- in this case, we check for scheme
-
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		if !strings.Contains(err.Error(), "missing port in address") {
-			return "", "", err
-		}
-		host = addr
-	}
-
-	return host, port, nil
 }
 
 // mainPing is entry point for ping command.

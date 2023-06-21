@@ -19,7 +19,6 @@ package cmd
 
 import (
 	"github.com/minio/cli"
-	"github.com/minio/pkg/console"
 )
 
 var adminSubnetRegisterCmd = cli.Command{
@@ -32,7 +31,7 @@ var adminSubnetRegisterCmd = cli.Command{
 	CustomHelpTemplate: "Please use 'mc support register'",
 }
 
-func mainAdminRegister(ctx *cli.Context) error {
-	console.Infoln("Please use 'mc support register'")
+func mainAdminRegister(_ *cli.Context) error {
+	deprecatedError("mc support register")
 	return nil
 }

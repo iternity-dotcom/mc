@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/dustin/go-humanize"
 	"github.com/fatih/color"
 	jsoniter "github.com/json-iterator/go"
 	"github.com/minio/cli"
@@ -278,7 +279,7 @@ func doCopy(ctx context.Context, cpURLs URLs, pg ProgressReader, encKeyDB map[st
 }
 
 // doCopyFake - Perform a fake copy to update the progress bar appropriately.
-func doCopyFake(ctx context.Context, cpURLs URLs, pg Progress) URLs {
+func doCopyFake(cpURLs URLs, pg Progress) URLs {
 	if progressReader, ok := pg.(*progressBar); ok {
 		progressReader.ProgressBar.Add64(cpURLs.SourceContent.Size)
 	}
@@ -467,11 +468,10 @@ func doCopySession(ctx context.Context, cancelCopy context.CancelFunc, cli *cli.
 							"Unable to start copying.")
 					}
 					break
-				} else {
-					totalBytes += cpURLs.SourceContent.Size
-					pg.SetTotal(totalBytes)
-					totalObjects++
 				}
+				totalBytes += cpURLs.SourceContent.Size
+				pg.SetTotal(totalBytes)
+				totalObjects++
 				cpURLsCh <- cpURLs
 			}
 			close(cpURLsCh)
@@ -489,6 +489,7 @@ func doCopySession(ctx context.Context, cancelCopy context.CancelFunc, cli *cli.
 			close(statusCh)
 		}
 
+		startContinue := true
 		for {
 			select {
 			case <-quitCh:
@@ -548,9 +549,18 @@ func doCopySession(ctx context.Context, cancelCopy context.CancelFunc, cli *cli.
 				// Verify if previously copied, notify progress bar.
 				if isCopied != nil && isCopied(cpURLs.SourceContent.URL.String()) {
 					parallel.queueTask(func() URLs {
-						return doCopyFake(ctx, cpURLs, pg)
+						return doCopyFake(cpURLs, pg)
 					}, 0)
 				} else {
+					// Print the copy resume summary once in start
+					if startContinue && cli.Bool("continue") {
+						if pb, ok := pg.(*progressBar); ok {
+							startSize := humanize.IBytes(uint64(pb.Start().Get()))
+							totalSize := humanize.IBytes(uint64(pb.Total))
+							console.Println("Resuming copy from ", startSize, " / ", totalSize)
+						}
+						startContinue = false
+					}
 					parallel.queueTask(func() URLs {
 						return doCopy(ctx, cpURLs, pg, encKeyDB, isMvCmd, preserve, isZip)
 					}, cpURLs.SourceContent.Size)

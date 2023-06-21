@@ -20,7 +20,7 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/minio/madmin-go"
+	"github.com/minio/madmin-go/v3"
 )
 
 type hri struct {

@@ -18,11 +18,13 @@
 package cmd
 
 import (
-	"strings"
+	"fmt"
 
+	"github.com/charmbracelet/bubbles/table"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/minio/cli"
 	json "github.com/minio/colorjson"
-	"github.com/minio/madmin-go"
+	"github.com/minio/madmin-go/v3"
 	"github.com/minio/mc/pkg/probe"
 	"github.com/minio/pkg/console"
 )
@@ -90,20 +92,43 @@ type supportCallhomeMessage struct {
 
 // String colorized callhome command output message.
 func (s supportCallhomeMessage) String() string {
-	var msg string
 	if s.Action == "status" {
-		msgs := []string{}
+		columns := []table.Column{
+			{Title: "Features", Width: 20},
+			{Title: "", Width: 15},
+		}
+
+		rows := []table.Row{}
+
 		if len(s.Diag) > 0 {
-			msgs = append(msgs, "Diagnostics is "+s.Diag)
+			rows = append(rows, table.Row{licInfoField("Diagnostics"), licInfoVal(s.Diag)})
 		}
 		if len(s.Logs) > 0 {
-			msgs = append(msgs, "Logs is "+s.Logs)
+			rows = append(rows, table.Row{licInfoField("Logs"), licInfoVal(s.Logs)})
 		}
-		msg = strings.Join(msgs, "\n")
-	} else {
-		msg = s.Feature + " is now " + s.Action
+
+		t := table.New(
+			table.WithColumns(columns),
+			table.WithRows(rows),
+			table.WithFocused(true),
+			table.WithHeight(len(rows)),
+		)
+
+		s := table.DefaultStyles()
+		s.Header = s.Header.
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderForeground(lipgloss.Color("240")).
+			BorderBottom(true).
+			Bold(false)
+		s.Selected = s.Selected.Bold(false)
+		t.SetStyles(s)
+
+		return lipgloss.NewStyle().
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderForeground(lipgloss.Color("240")).Render(t.View())
 	}
-	return console.Colorize(supportSuccessMsgTag, msg)
+
+	return console.Colorize(supportSuccessMsgTag, s.Feature+" is now "+s.Action)
 }
 
 // JSON jsonified callhome command output message.
@@ -120,8 +145,10 @@ func isDiagCallhomeEnabled(alias string) bool {
 }
 
 func mainCallhome(ctx *cli.Context) error {
+	initLicInfoColors()
+
 	setSuccessMessageColor()
-	alias, arg := checkToggleCmdSyntax(ctx, "callhome")
+	alias, arg := checkToggleCmdSyntax(ctx)
 
 	diag, logs := parseCallhomeFlags(ctx)
 
@@ -212,4 +239,27 @@ func setCallhomeConfig(alias string, enableCallhome bool) {
 	configStr := "callhome enable=" + enableStr
 	_, e := client.SetConfigKV(globalContext, configStr)
 	fatalIf(probe.NewError(e), "Unable to set callhome config on minio")
+}
+
+func configureSubnetWebhook(alias string, enable bool) {
+	// Create a new MinIO Admin Client
+	client, err := newAdminClient(alias)
+	fatalIf(err, "Unable to initialize admin connection.")
+
+	var input string
+	if enable {
+		apiKey := validateClusterRegistered(alias, true)
+		input = fmt.Sprintf("logger_webhook:subnet endpoint=%s auth_token=%s enable=on",
+			subnetLogWebhookURL(), apiKey)
+	} else {
+		input = "logger_webhook:subnet enable=off"
+	}
+
+	// Call set config API
+	_, e := client.SetConfigKV(globalContext, input)
+	fatalIf(probe.NewError(e), "Unable to set '%s' to server", input)
+}
+
+func isLogsCallhomeEnabled(alias string) bool {
+	return isFeatureEnabled(alias, "logger_webhook", "subnet")
 }

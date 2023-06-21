@@ -18,11 +18,15 @@
 package cmd
 
 import (
-	"io/ioutil"
+	"fmt"
+	"os"
+	"time"
 
+	"github.com/fatih/color"
 	"github.com/minio/cli"
-	"github.com/minio/madmin-go"
+	"github.com/minio/madmin-go/v3"
 	"github.com/minio/mc/pkg/probe"
+	"github.com/minio/pkg/console"
 )
 
 var adminUserSvcAcctSetFlags = []cli.Flag{
@@ -33,6 +37,18 @@ var adminUserSvcAcctSetFlags = []cli.Flag{
 	cli.StringFlag{
 		Name:  "policy",
 		Usage: "path to a JSON policy file",
+	},
+	cli.StringFlag{
+		Name:  "name",
+		Usage: "name for the service account",
+	},
+	cli.StringFlag{
+		Name:  "description",
+		Usage: "description for the service account",
+	},
+	cli.StringFlag{
+		Name:  "expiry",
+		Usage: "time of expiration for the service account",
 	},
 }
 
@@ -56,6 +72,12 @@ FLAGS:
 EXAMPLES:
   1. Change the secret key of the service account 'J123C4ZXEQN8RK6ND35I' in MinIO server.
      {{.Prompt}} {{.HelpName}} myminio/ 'J123C4ZXEQN8RK6ND35I' --secret-key 'xxxxxxx'
+	2. Change the expiry of the service account 'J123C4ZXEQN8RK6ND35I' in MinIO server.
+     {{.Prompt}} {{.HelpName}} myminio/ 'J123C4ZXEQN8RK6ND35I' --expiry 2023-06-24
+     {{.Prompt}} {{.HelpName}} myminio/ 'J123C4ZXEQN8RK6ND35I' --expiry 2023-06-24T10:00
+     {{.Prompt}} {{.HelpName}} myminio/ 'J123C4ZXEQN8RK6ND35I' --expiry 2023-06-24T10:00:00
+     {{.Prompt}} {{.HelpName}} myminio/ 'J123C4ZXEQN8RK6ND35I' --expiry 2023-06-24T10:00:00Z
+     {{.Prompt}} {{.HelpName}} myminio/ 'J123C4ZXEQN8RK6ND35I' --expiry 2023-06-24T10:00:00-07:00
 `,
 }
 
@@ -70,6 +92,8 @@ func checkAdminUserSvcAcctSetSyntax(ctx *cli.Context) {
 func mainAdminUserSvcAcctSet(ctx *cli.Context) error {
 	checkAdminUserSvcAcctSetSyntax(ctx)
 
+	console.SetColor("AccMessage", color.New(color.FgGreen))
+
 	// Get the alias parameter from cli
 	args := ctx.Args()
 	aliasedURL := args.Get(0)
@@ -77,6 +101,9 @@ func mainAdminUserSvcAcctSet(ctx *cli.Context) error {
 
 	secretKey := ctx.String("secret-key")
 	policyPath := ctx.String("policy")
+	name := ctx.String("name")
+	description := ctx.String("description")
+	expiry := ctx.String("expiry")
 
 	// Create a new MinIO Admin Client
 	client, err := newAdminClient(aliasedURL)
@@ -85,20 +112,48 @@ func mainAdminUserSvcAcctSet(ctx *cli.Context) error {
 	var buf []byte
 	if policyPath != "" {
 		var e error
-		buf, e = ioutil.ReadFile(policyPath)
+		buf, e = os.ReadFile(policyPath)
 		fatalIf(probe.NewError(e), "Unable to open the policy document.")
 	}
 
+	var expiryTime time.Time
+	var expiryPointer *time.Time
+
+	if expiry != "" {
+		location, e := time.LoadLocation("Local")
+		if e != nil {
+			fatalIf(probe.NewError(e), "Unable to parse the expiry argument.")
+		}
+
+		patternMatched := false
+		for _, format := range supportedTimeFormats {
+			t, e := time.ParseInLocation(format, expiry, location)
+			if e == nil {
+				patternMatched = true
+				expiryTime = t
+				expiryPointer = &expiryTime
+				break
+			}
+		}
+
+		if !patternMatched {
+			fatalIf(probe.NewError(fmt.Errorf("expiry argument is not matching any of the supported patterns")), "unable to parse the expiry argument.")
+		}
+	}
+
 	opts := madmin.UpdateServiceAccountReq{
-		NewPolicy:    buf,
-		NewSecretKey: secretKey,
+		NewPolicy:      buf,
+		NewSecretKey:   secretKey,
+		NewName:        name,
+		NewDescription: description,
+		NewExpiration:  expiryPointer,
 	}
 
 	e := client.UpdateServiceAccount(globalContext, svcAccount, opts)
 	fatalIf(probe.NewError(e).Trace(args...), "Unable to edit the specified service account")
 
-	printMsg(svcAcctMessage{
-		op:        ctx.Command.Name,
+	printMsg(acctMessage{
+		op:        svcAccOpSet,
 		AccessKey: svcAccount,
 	})
 

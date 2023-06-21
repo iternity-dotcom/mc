@@ -97,8 +97,8 @@ var (
 			Usage: "remove object(s) versions that are non-current",
 		},
 		cli.BoolFlag{
-			Name:   "force-delete",
-			Usage:  "attempt a prefix force delete, requires confirmation please use with caution",
+			Name:   "purge",
+			Usage:  "attempt a prefix purge, requires confirmation please use with caution - only works with '--force'",
 			Hidden: true,
 		},
 	}
@@ -210,7 +210,7 @@ func checkRmSyntax(ctx context.Context, cliCtx *cli.Context, encKeyDB map[string
 	isDangerous := cliCtx.Bool("dangerous")
 	isVersions := cliCtx.Bool("versions")
 	isNoncurrentVersion := cliCtx.Bool("non-current")
-	isForceDel := cliCtx.Bool("force-delete")
+	isForceDel := cliCtx.Bool("purge")
 	versionID := cliCtx.String("version-id")
 	rewind := cliCtx.String("rewind")
 	isNamespaceRemoval := false
@@ -227,14 +227,17 @@ func checkRmSyntax(ctx context.Context, cliCtx *cli.Context, encKeyDB map[string
 
 	if isForceDel && !isForce {
 		fatalIf(errDummy().Trace(),
-			"You cannot specify --force-delete without --force.")
+			"You cannot specify --purge without --force.")
 	}
 
 	if isForceDel && isRecursive {
 		fatalIf(errDummy().Trace(),
-			"You cannot specify --force-delete with --recursive.")
+			"You cannot specify --purge with --recursive.")
 	}
-
+	if isForceDel && (isNoncurrentVersion || isVersions || cliCtx.IsSet("older-than") || cliCtx.IsSet("newer-than") || versionID != "") {
+		fatalIf(errDummy().Trace(),
+			"You cannot specify --purge flag with any flag(s) other than --force.")
+	}
 	for _, url := range cliCtx.Args() {
 		// clean path for aliases like s3/.
 		// Note: UNC path using / works properly in go 1.9.2 even though it breaks the UNC specification.
@@ -358,7 +361,7 @@ func removeSingle(url, versionID string, opts removeOpts) error {
 			printMsg(msg)
 		}
 	} else {
-		printDryRunMsg(content)
+		printDryRunMsg(content, opts.withVersions)
 	}
 	return nil
 }
@@ -378,12 +381,12 @@ type removeOpts struct {
 	encKeyDB          map[string][]prefixSSEPair
 }
 
-func printDryRunMsg(content *ClientContent) {
-	if globalJSON {
+func printDryRunMsg(content *ClientContent, printModTime bool) {
+	if globalJSON || content == nil {
 		return
 	}
-	if content.VersionID != "" {
-		fmt.Println("DRYRUN: Removing ", content.URL.Path, "version:", content.VersionID)
+	if printModTime {
+		fmt.Println("DRYRUN: Removing ", content.VersionID, content.Time.Format(printDate), content.URL.Path)
 		return
 	}
 	fmt.Println("DRYRUN: Removing ", content.URL.Path)
@@ -469,7 +472,7 @@ func listAndRemove(url string, opts removeOpts) error {
 					}
 
 					if opts.isFake {
-						printDryRunMsg(content)
+						printDryRunMsg(content, true)
 						continue
 					}
 
@@ -565,7 +568,7 @@ func listAndRemove(url string, opts removeOpts) error {
 				}
 			}
 		} else {
-			printDryRunMsg(content)
+			printDryRunMsg(content, opts.withVersions)
 		}
 	}
 
@@ -590,7 +593,7 @@ func listAndRemove(url string, opts removeOpts) error {
 			}
 
 			if opts.isFake {
-				printDryRunMsg(content)
+				printDryRunMsg(content, true)
 				continue
 			}
 
@@ -686,7 +689,7 @@ func mainRm(cliCtx *cli.Context) error {
 	olderThan := cliCtx.String("older-than")
 	newerThan := cliCtx.String("newer-than")
 	isForce := cliCtx.Bool("force")
-	isForceDel := cliCtx.Bool("force-delete")
+	isForceDel := cliCtx.Bool("purge")
 	withNoncurrentVersion := cliCtx.Bool("non-current")
 	withVersions := cliCtx.Bool("versions")
 	versionID := cliCtx.String("version-id")

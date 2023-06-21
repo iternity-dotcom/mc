@@ -28,25 +28,25 @@ import (
 	"github.com/fatih/color"
 	"github.com/minio/cli"
 	json "github.com/minio/colorjson"
-	"github.com/minio/madmin-go"
+	"github.com/minio/madmin-go/v3"
 	"github.com/minio/mc/pkg/probe"
 	"github.com/minio/pkg/console"
 )
 
 var supportPerfFlags = append([]cli.Flag{
 	cli.StringFlag{
-		Name:  "duration",
-		Usage: "duration the entire perf tests are run",
-		Value: "10s",
+		Name:  "size",
+		Usage: "size of the object used for uploads/downloads",
+		Value: "64MiB",
 	},
 	cli.BoolFlag{
 		Name:  "verbose, v",
 		Usage: "display per-server stats",
 	},
 	cli.StringFlag{
-		Name:   "size",
-		Usage:  "size of the object used for uploads/downloads",
-		Value:  "64MiB",
+		Name:   "duration",
+		Usage:  "maximum duration each perf tests are run",
+		Value:  "10s",
 		Hidden: true,
 	},
 	cli.IntFlag{
@@ -58,6 +58,11 @@ var supportPerfFlags = append([]cli.Flag{
 	cli.StringFlag{
 		Name:   "bucket",
 		Usage:  "provide a custom bucket name to use (NOTE: bucket must be created prior)",
+		Hidden: true, // Hidden for now.
+	},
+	cli.BoolFlag{
+		Name:   "noclear",
+		Usage:  "do not clear bucket after running object perf test",
 		Hidden: true, // Hidden for now.
 	},
 	// Drive test specific flags.
@@ -97,12 +102,12 @@ USAGE:
 FLAGS:
   {{range .VisibleFlags}}{{.}}
   {{end}}
-
 EXAMPLES:
   1. Upload object storage, network, and drive performance analysis for cluster with alias 'myminio' to SUBNET
      {{.Prompt}} {{.HelpName}} myminio
+
   2. Run object storage, network, and drive performance tests on cluster with alias 'myminio', save and upload to SUBNET manually
-     {{.Prompt}} {{.HelpName}} --airgap myminio
+     {{.Prompt}} {{.HelpName}} myminio --airgap
 `,
 }
 
@@ -397,33 +402,39 @@ func execSupportPerf(ctx *cli.Context, aliasedURL string, perfType string) {
 		return
 	}
 
-	resultFileNamePfx := fmt.Sprintf("%s-perf_%s", filepath.Clean(alias), UTCNow().Format("20060102150405"))
-	resultFileName := resultFileNamePfx + ".json"
+	// If results still not available, don't write anything
+	if len(results) == 0 {
+		clr := color.New(color.FgRed, color.Bold)
+		clr.Println("Nothing available to upload to SUBNET yet.")
+	} else {
+		resultFileNamePfx := fmt.Sprintf("%s-perf_%s", filepath.Clean(alias), UTCNow().Format("20060102150405"))
+		resultFileName := resultFileNamePfx + ".json"
 
-	regInfo := getClusterRegInfo(getAdminInfo(aliasedURL), alias)
-	tmpFileName, e := zipPerfResult(convertPerfResults(results), resultFileName, regInfo)
-	fatalIf(probe.NewError(e), "Error creating zip from perf test results:")
+		regInfo := getClusterRegInfo(getAdminInfo(aliasedURL), alias)
+		tmpFileName, e := zipPerfResult(convertPerfResults(results), resultFileName, regInfo)
+		fatalIf(probe.NewError(e), "Error creating zip from perf test results:")
 
-	if globalAirgapped {
-		savePerfResultFile(tmpFileName, resultFileNamePfx, alias)
-		return
+		if globalAirgapped {
+			savePerfResultFile(tmpFileName, resultFileNamePfx)
+			return
+		}
+
+		uploadURL := subnetUploadURL("perf", tmpFileName)
+		reqURL, headers := prepareSubnetUploadURL(uploadURL, alias, apiKey)
+
+		_, e = uploadFileToSubnet(alias, tmpFileName, reqURL, headers)
+		if e != nil {
+			console.Errorln("Unable to upload perf test results to SUBNET portal: " + e.Error())
+			savePerfResultFile(tmpFileName, resultFileNamePfx)
+			return
+		}
+
+		clr := color.New(color.FgGreen, color.Bold)
+		clr.Println("uploaded successfully to SUBNET.")
 	}
-
-	uploadURL := subnetUploadURL("perf", tmpFileName)
-	reqURL, headers := prepareSubnetUploadURL(uploadURL, alias, tmpFileName, apiKey)
-
-	_, e = uploadFileToSubnet(alias, tmpFileName, reqURL, headers)
-	if e != nil {
-		console.Errorln("Unable to upload perf test results to SUBNET portal: " + e.Error())
-		savePerfResultFile(tmpFileName, resultFileNamePfx, alias)
-		return
-	}
-
-	clr := color.New(color.FgGreen, color.Bold)
-	clr.Println("uploaded successfully to SUBNET.")
 }
 
-func savePerfResultFile(tmpFileName string, resultFileNamePfx string, alias string) {
+func savePerfResultFile(tmpFileName string, resultFileNamePfx string) {
 	zipFileName := resultFileNamePfx + ".zip"
 	e := moveFile(tmpFileName, zipFileName)
 	fatalIf(probe.NewError(e), fmt.Sprintf("Error moving temp file %s to %s:", tmpFileName, zipFileName))
@@ -467,18 +478,13 @@ func writeJSONObjToZip(zipWriter *zip.Writer, obj interface{}, filename string) 
 		return e
 	}
 
-	enc := gojson.NewEncoder(writer)
-	if e = enc.Encode(obj); e != nil {
-		return e
-	}
-
-	return nil
+	return gojson.NewEncoder(writer).Encode(obj)
 }
 
 // compress MinIO performance output
 func zipPerfResult(perfOutput PerfTestOutput, resultFilename string, regInfo ClusterRegistrationInfo) (string, error) {
-	// Create profile zip file
-	tmpArchive, e := os.CreateTemp("", "mc-perf-")
+	// Create perf results zip file
+	tmpArchive, e := os.CreateTemp("", "mc-perf-*.zip")
 
 	if e != nil {
 		return "", e

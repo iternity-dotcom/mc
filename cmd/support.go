@@ -23,7 +23,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/minio/cli"
 	json "github.com/minio/colorjson"
-	"github.com/minio/madmin-go"
+	"github.com/minio/madmin-go/v3"
 	"github.com/minio/mc/pkg/probe"
 	"github.com/minio/minio-go/v7/pkg/set"
 	"github.com/minio/pkg/console"
@@ -40,7 +40,6 @@ var supportGlobalFlags = append(globalFlags, cli.BoolFlag{
 var supportSubcommands = []cli.Command{
 	supportRegisterCmd,
 	supportCallhomeCmd,
-	supportLogsCmd,
 	supportDiagCmd,
 	supportPerfCmd,
 	supportInspectCmd,
@@ -71,7 +70,7 @@ func validateToggleCmdArg(arg string) error {
 	return nil
 }
 
-func checkToggleCmdSyntax(ctx *cli.Context, cmdName string) (string, string) {
+func checkToggleCmdSyntax(ctx *cli.Context) (string, string) {
 	if len(ctx.Args()) != 2 {
 		showCommandHelpAndExit(ctx, 1) // last argument is exit code
 	}

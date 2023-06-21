@@ -470,7 +470,7 @@ func (mj *mirrorJob) doMirror(ctx context.Context, sURLs URLs) URLs {
 	now := time.Now()
 	ret := uploadSourceToTargetURL(ctx, sURLs, mj.status, mj.opts.encKeyDB, mj.opts.isMetadata, false)
 	if ret.Error == nil {
-		durationMs := time.Since(now) / time.Millisecond
+		durationMs := time.Since(now).Milliseconds()
 		mirrorReplicationDurations.With(prometheus.Labels{"object_size": convertSizeToTag(sURLs.SourceContent.Size)}).Observe(float64(durationMs))
 	}
 	return ret
@@ -496,33 +496,40 @@ func (mj *mirrorJob) monitorMirrorStatus(cancel context.CancelFunc) (errDuringMi
 		mirrorTotalOps.Inc()
 
 		if sURLs.Error != nil {
-			mirrorFailedOps.Inc()
+			var ignoreErr bool
+
 			switch {
 			case sURLs.SourceContent != nil:
-				if !isErrIgnored(sURLs.Error) {
+				if isErrIgnored(sURLs.Error) {
+					ignoreErr = true
+				} else {
 					errorIf(sURLs.Error.Trace(sURLs.SourceContent.URL.String()),
 						fmt.Sprintf("Failed to copy `%s`.", sURLs.SourceContent.URL.String()))
-					errDuringMirror = true
 				}
 			case sURLs.TargetContent != nil:
 				// When sURLs.SourceContent is nil, we know that we have an error related to removing
 				errorIf(sURLs.Error.Trace(sURLs.TargetContent.URL.String()),
 					fmt.Sprintf("Failed to remove `%s`.", sURLs.TargetContent.URL.String()))
-				errDuringMirror = true
 			default:
+				if strings.Contains(sURLs.Error.ToGoError().Error(), "Overwrite not allowed") {
+					ignoreErr = true
+				}
 				if sURLs.ErrorCond == differInUnknown {
 					errorIf(sURLs.Error.Trace(), "Failed to perform mirroring")
 				} else {
 					errorIf(sURLs.Error.Trace(),
 						"Failed to perform mirroring, with error condition (%s)", sURLs.ErrorCond)
 				}
-				errDuringMirror = true
 			}
 
-			// Do not quit mirroring if we are in --watch or --active-active mode
-			if !mj.opts.activeActive && !mj.opts.isWatch {
-				cancel()
-				cancelInProgress = true
+			if !ignoreErr {
+				mirrorFailedOps.Inc()
+				errDuringMirror = true
+				// Quit mirroring if --watch and --active-active are not passed
+				if !mj.opts.activeActive && !mj.opts.isWatch {
+					cancel()
+					cancelInProgress = true
+				}
 			}
 
 			continue
@@ -550,8 +557,8 @@ func (mj *mirrorJob) watchMirrorEvents(ctx context.Context, events []EventInfo) 
 		// If the passed source URL points to fs, fetch the absolute src path
 		// to correctly calculate targetPath
 		if sourceAlias == "" {
-			tmpSrcURL, err := filepath.Abs(sourceURLFull)
-			if err == nil {
+			tmpSrcURL, e := filepath.Abs(sourceURLFull)
+			if e == nil {
 				sourceURLFull = tmpSrcURL
 			}
 		}
@@ -853,7 +860,7 @@ func getEventPathURLWin(srcURL, eventPath string) string {
 }
 
 // runMirror - mirrors all buckets to another S3 server
-func runMirror(ctx context.Context, cancelMirror context.CancelFunc, srcURL, dstURL string, cli *cli.Context, encKeyDB map[string][]prefixSSEPair) bool {
+func runMirror(ctx context.Context, srcURL, dstURL string, cli *cli.Context, encKeyDB map[string][]prefixSSEPair) bool {
 	// Parse metadata.
 	userMetadata := make(map[string]string)
 	if cli.String("attr") != "" {
@@ -910,7 +917,7 @@ func runMirror(ctx context.Context, cancelMirror context.CancelFunc, srcURL, dst
 
 	if mirrorSrcBuckets || createDstBuckets {
 		// Synchronize buckets using dirDifference function
-		for d := range dirDifference(ctx, srcClt, dstClt) {
+		for d := range bucketDifference(ctx, srcClt, dstClt) {
 			if d.Error != nil {
 				if mj.opts.activeActive {
 					errorIf(d.Error, "Failed to start mirroring.. retrying")
@@ -921,7 +928,7 @@ func runMirror(ctx context.Context, cancelMirror context.CancelFunc, srcURL, dst
 
 			if d.Diff == differInSecond {
 				diffBucket := strings.TrimPrefix(d.SecondURL, dstClt.GetURL().String())
-				if isRemove {
+				if !isFake && isRemove {
 					aliasedDstBucket := path.Join(dstURL, diffBucket)
 					err := deleteBucket(ctx, aliasedDstBucket, false)
 					mj.status.fatalIf(err, "Failed to start mirroring.")
@@ -1030,7 +1037,7 @@ func mainMirror(cliCtx *cli.Context) error {
 		case <-ctx.Done():
 			return exitStatus(globalErrorExitStatus)
 		default:
-			errorDetected := runMirror(ctx, cancelMirror, srcURL, tgtURL, cliCtx, encKeyDB)
+			errorDetected := runMirror(ctx, srcURL, tgtURL, cliCtx, encKeyDB)
 			if cliCtx.Bool("watch") || cliCtx.Bool("multi-master") || cliCtx.Bool("active-active") {
 				mirrorRestarts.Inc()
 				time.Sleep(time.Duration(r.Float64() * float64(2*time.Second)))

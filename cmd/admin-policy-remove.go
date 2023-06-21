@@ -26,7 +26,8 @@ import (
 
 var adminPolicyRemoveCmd = cli.Command{
 	Name:         "remove",
-	Usage:        "remove policy",
+	ShortName:    "rm",
+	Usage:        "remove an IAM policy",
 	Action:       mainAdminPolicyRemove,
 	OnUsageError: onUsageError,
 	Before:       setGlobalsFromContext,

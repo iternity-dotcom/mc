@@ -69,7 +69,7 @@ func checkAdminUserSvcAcctInfoSyntax(ctx *cli.Context) {
 func mainAdminUserSvcAcctInfo(ctx *cli.Context) error {
 	checkAdminUserSvcAcctInfoSyntax(ctx)
 
-	console.SetColor("SVCMessage", color.New(color.FgGreen))
+	console.SetColor("AccMessage", color.New(color.FgGreen))
 
 	// Get the alias parameter from cli
 	args := ctx.Args()
@@ -95,13 +95,16 @@ func mainAdminUserSvcAcctInfo(ctx *cli.Context) error {
 		return nil
 	}
 
-	printMsg(svcAcctMessage{
-		op:            ctx.Command.Name,
+	printMsg(acctMessage{
+		op:            svcAccOpInfo,
 		AccessKey:     svcAccount,
+		Name:          svcInfo.Name,
+		Description:   svcInfo.Description,
 		AccountStatus: svcInfo.AccountStatus,
 		ParentUser:    svcInfo.ParentUser,
 		ImpliedPolicy: svcInfo.ImpliedPolicy,
 		Policy:        json.RawMessage(svcInfo.Policy),
+		Expiration:    svcInfo.Expiration,
 	})
 
 	return nil

@@ -21,7 +21,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"time"
@@ -88,11 +87,11 @@ func mainClusterBucketExport(ctx *cli.Context) error {
 	fatalIf(probe.NewError(e).Trace(aliasedURL), "Unable to export bucket metadata.")
 
 	if bucket == "" {
-		bucket = "cluster"
+		bucket = "bucket"
 	}
 
 	// Create bucket metadata zip file
-	tmpFile, e := ioutil.TempFile("", fmt.Sprintf("%s-metadata-", bucket))
+	tmpFile, e := os.CreateTemp("", fmt.Sprintf("%s-%s-metadata-", aliasedURL, bucket))
 	fatalIf(probe.NewError(e), "Unable to download file data.")
 
 	ext := "zip"
@@ -105,7 +104,7 @@ func mainClusterBucketExport(ctx *cli.Context) error {
 	tmpFile.Close()
 
 	// We use 4 bytes of the 32 bytes to identify the file.
-	downloadPath := fmt.Sprintf("%s-metadata.%s", bucket, ext)
+	downloadPath := fmt.Sprintf("%s-%s-metadata.%s", aliasedURL, bucket, ext)
 	fi, e := os.Stat(downloadPath)
 	if e == nil && !fi.IsDir() {
 		e = moveFile(downloadPath, downloadPath+"."+time.Now().Format(dateTimeFormatFilename))

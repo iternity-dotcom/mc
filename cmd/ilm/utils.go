@@ -65,7 +65,7 @@ func getExpirationDays(rule lifecycle.Rule) int {
 		return int(rule.Expiration.Days)
 	}
 	if !rule.Expiration.Date.Time.IsZero() {
-		return int(time.Now().UTC().Sub(rule.Expiration.Date.Time).Hours() / 24)
+		return int(time.Until(rule.Expiration.Date.Time).Hours() / 24)
 	}
 
 	return 0
@@ -98,7 +98,7 @@ func ToTables(cfg *lifecycle.Configuration, filter LsFilter) []Table {
 				ExpireDelMarker: bool(rule.Expiration.DeleteMarker),
 			})
 		}
-		if !rule.NoncurrentVersionExpiration.IsDaysNull() {
+		if !rule.NoncurrentVersionExpiration.IsDaysNull() || rule.NoncurrentVersionExpiration.NewerNoncurrentVersions > 0 {
 			expNoncur = append(expNoncur, expirationNoncurrentRow{
 				ID:           rule.ID,
 				Status:       rule.Status,

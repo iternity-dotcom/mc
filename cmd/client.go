@@ -60,6 +60,7 @@ type PutOptions struct {
 	storageClass          string
 	multipartSize         uint64
 	multipartThreads      uint
+	concurrentStream      bool
 }
 
 // StatOptions holds options of the HEAD operation
@@ -105,6 +106,7 @@ type Client interface {
 	// Bucket operations
 	MakeBucket(ctx context.Context, region string, ignoreExisting, withLock bool) *probe.Error
 	RemoveBucket(ctx context.Context, forceRemove bool) *probe.Error
+	ListBuckets(ctx context.Context) ([]*ClientContent, *probe.Error)
 
 	// Object lock config
 	SetObjectLockConfig(ctx context.Context, mode minio.RetentionMode, validity uint64, unit minio.ValidityUnit) *probe.Error
@@ -150,7 +152,7 @@ type Client interface {
 	DeleteTags(ctx context.Context, versionID string) *probe.Error
 
 	// Lifecycle operations
-	GetLifecycle(ctx context.Context) (*lifecycle.Configuration, *probe.Error)
+	GetLifecycle(ctx context.Context) (*lifecycle.Configuration, time.Time, *probe.Error)
 	SetLifecycle(ctx context.Context, config *lifecycle.Configuration) *probe.Error
 
 	// Versioning operations
@@ -188,6 +190,7 @@ type ClientContent struct {
 	Type         os.FileMode
 	StorageClass string
 	Metadata     map[string]string
+	Tags         map[string]string
 	UserMetadata map[string]string
 	ETag         string
 	Expires      time.Time
@@ -225,6 +228,8 @@ type Config struct {
 	Lookup            minio.BucketLookupType
 	ConnReadDeadline  time.Duration
 	ConnWriteDeadline time.Duration
+	UploadLimit       int64
+	DownloadLimit     int64
 	Transport         *http.Transport
 }
 

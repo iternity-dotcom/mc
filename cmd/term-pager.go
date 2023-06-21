@@ -126,7 +126,8 @@ func (tp *termPager) init() {
 		)
 
 		go func() {
-			tp.statusCh <- tp.teaPager.Start()
+			_, e := tp.teaPager.Run()
+			tp.statusCh <- e
 			close(tp.statusCh)
 		}()
 
@@ -169,7 +170,8 @@ func (tp *termPager) WaitForExit() {
 	// Wait until the term pager this is closed
 	// which is trigerred when there is an error
 	// or the user quits
-	for range tp.statusCh {
+	for status := range tp.statusCh {
+		_ = status
 	}
 }
 

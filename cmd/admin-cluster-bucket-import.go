@@ -30,7 +30,7 @@ import (
 	"github.com/klauspost/compress/zip"
 	"github.com/minio/cli"
 	json "github.com/minio/colorjson"
-	"github.com/minio/madmin-go"
+	"github.com/minio/madmin-go/v3"
 	"github.com/minio/mc/pkg/probe"
 	"github.com/minio/pkg/console"
 )
@@ -54,7 +54,7 @@ FLAGS:
   {{end}}
 EXAMPLES:
   1. Recover bucket metadata for all buckets from previously saved bucket metadata backup.
-     {{.Prompt}} {{.HelpName}} myminio /backups/cluster-metadata.zip
+     {{.Prompt}} {{.HelpName}} myminio /backups/myminio-bucket-metadata.zip
 `,
 }
 
@@ -177,7 +177,6 @@ func (i importMetaMsg) String() string {
 }
 
 func (i importMetaMsg) JSON() string {
-	i.Status = "success"
 	buf := &bytes.Buffer{}
 	enc := json.NewEncoder(buf)
 	enc.SetIndent("", " ")

@@ -21,7 +21,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -31,7 +30,7 @@ import (
 	"github.com/dustin/go-humanize"
 	"github.com/fatih/color"
 	"github.com/minio/cli"
-	"github.com/minio/madmin-go"
+	"github.com/minio/madmin-go/v3"
 	"github.com/minio/mc/pkg/probe"
 	"github.com/minio/pkg/console"
 	"github.com/olekukonko/tablewriter"
@@ -100,19 +99,7 @@ func mainAdminReplicationResyncStatus(ctx *cli.Context) error {
 	ctxt, cancel := context.WithCancel(globalContext)
 	defer cancel()
 
-	done := make(chan struct{})
-
 	ui := tea.NewProgram(initResyncMetricsUI(peer.DeploymentID))
-	if !globalJSON {
-		go func() {
-			if e := ui.Start(); e != nil {
-				cancel()
-				os.Exit(1)
-			}
-			close(done)
-		}()
-	}
-
 	go func() {
 		opts := madmin.MetricsOptions{
 			Type:    madmin.MetricsSiteResync,
@@ -133,11 +120,17 @@ func mainAdminReplicationResyncStatus(ctx *cli.Context) error {
 			}
 		})
 		if e != nil && !errors.Is(e, context.Canceled) {
-			fatalIf(probe.NewError(e).Trace(ctx.Args()...), "Unable to get current status")
+			fatalIf(probe.NewError(e).Trace(ctx.Args()...), "Unable to get resync status")
 		}
 	}()
 
-	<-done
+	if !globalJSON {
+		if _, e := ui.Run(); e != nil {
+			cancel()
+			fatalIf(probe.NewError(e).Trace(aliasedURL), "Unable to get resync status")
+		}
+	}
+
 	return nil
 }
 
@@ -174,6 +167,10 @@ func (m *resyncMetricsUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case *madmin.SiteResyncMetrics:
 		m.current = *msg
+		if msg.ResyncStatus == "Canceled" {
+			m.quitting = true
+			return m, tea.Quit
+		}
 		if msg.Complete() {
 			m.quitting = true
 			return m, tea.Quit
@@ -228,6 +225,8 @@ func (m *resyncMetricsUI) View() string {
 	if m.current.ResyncID != "" {
 		accElapsedTime := m.current.LastUpdate.Sub(m.current.StartTime)
 		addLine("ResyncID: ", m.current.ResyncID)
+		addLine("Status: ", m.current.ResyncStatus)
+
 		addLine("Objects: ", m.current.ReplicatedCount)
 		addLine("Versions: ", m.current.ReplicatedCount)
 		addLine("FailedObjects: ", m.current.FailedCount)

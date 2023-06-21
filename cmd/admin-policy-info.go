@@ -22,7 +22,7 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/minio/cli"
-	"github.com/minio/madmin-go"
+	"github.com/minio/madmin-go/v3"
 	"github.com/minio/mc/pkg/probe"
 	"github.com/minio/pkg/console"
 )
@@ -36,7 +36,7 @@ var policyInfoFlags = []cli.Flag{
 
 var adminPolicyInfoCmd = cli.Command{
 	Name:         "info",
-	Usage:        "show info on a policy",
+	Usage:        "show info on an IAM policy",
 	Action:       mainAdminPolicyInfo,
 	OnUsageError: onUsageError,
 	Before:       setGlobalsFromContext,
@@ -107,14 +107,11 @@ func mainAdminPolicyInfo(ctx *cli.Context) error {
 
 	policyFile := ctx.String("policy-file")
 	if policyFile != "" {
-		f, err := os.Create(policyFile)
-		if err != nil {
-			fatalIf(probe.NewError(err).Trace(args...), "Could not open given policy file")
-		}
-		_, err = f.Write(pinfo.Policy)
-		if err != nil {
-			fatalIf(probe.NewError(err).Trace(args...), "Could not write to given policy file")
-		}
+		f, e := os.Create(policyFile)
+		fatalIf(probe.NewError(e).Trace(args...), "Could not open given policy file")
+
+		_, e = f.Write(pinfo.Policy)
+		fatalIf(probe.NewError(e).Trace(args...), "Could not write to given policy file")
 	}
 
 	printMsg(userPolicyMessage{

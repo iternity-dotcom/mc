@@ -24,7 +24,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/minio/cli"
 	json "github.com/minio/colorjson"
-	"github.com/minio/madmin-go"
+	"github.com/minio/madmin-go/v3"
 	"github.com/minio/mc/pkg/probe"
 	"github.com/minio/pkg/console"
 )
@@ -91,7 +91,14 @@ func (u lockMessage) String() string {
 		typeFieldMaxLen     = 6
 	)
 
-	lockState, timeDiff := getLockDuration(u.Lock.Elapsed)
+	elapsed := u.Lock.Elapsed
+	// elapsed can be zero with older MinIO versions,
+	// so this code is deprecated and can be removed later.
+	if elapsed == 0 {
+		elapsed = time.Now().UTC().Sub(u.Lock.Timestamp)
+	}
+
+	lockState, timeDiff := getLockDuration(elapsed)
 	return console.Colorize(lockState, newPrettyTable("  ",
 		Field{"Time", timeFieldMaxLen},
 		Field{"Type", typeFieldMaxLen},
@@ -101,7 +108,6 @@ func (u lockMessage) String() string {
 
 // JSON jsonified top oldest locks message.
 func (u lockMessage) JSON() string {
-	u.Status = "success"
 	type lockEntry struct {
 		Timestamp  time.Time `json:"time"`       // When the lock was first granted
 		Elapsed    string    `json:"elapsed"`    // Humanized duration for which lock has been held

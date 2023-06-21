@@ -35,7 +35,7 @@ import (
 	"github.com/klauspost/compress/gzip"
 	"github.com/minio/cli"
 	json "github.com/minio/colorjson"
-	"github.com/minio/madmin-go"
+	"github.com/minio/madmin-go/v3"
 	"github.com/minio/mc/pkg/probe"
 	"github.com/minio/pkg/console"
 	"github.com/tidwall/gjson"
@@ -183,7 +183,7 @@ func execSupportDiag(ctx *cli.Context, client *madmin.AdminClient, alias string,
 		// Retrieve subnet credentials (login/license) beforehand as
 		// it can take a long time to fetch the health information
 		uploadURL := subnetUploadURL("health", filename)
-		reqURL, headers = prepareSubnetUploadURL(uploadURL, alias, filename, apiKey)
+		reqURL, headers = prepareSubnetUploadURL(uploadURL, alias, apiKey)
 	}
 
 	healthInfo, version, e := fetchServerDiagInfo(ctx, client)
