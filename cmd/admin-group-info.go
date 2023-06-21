@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -49,7 +49,7 @@ EXAMPLES:
 // checkAdminGroupInfoSyntax - validate all the passed arguments
 func checkAdminGroupInfoSyntax(ctx *cli.Context) {
 	if len(ctx.Args()) != 2 {
-		cli.ShowCommandHelpAndExit(ctx, "info", 1) // last argument is exit code
+		showCommandHelpAndExit(ctx, 1) // last argument is exit code
 	}
 }
 
@@ -68,11 +68,11 @@ func mainAdminGroupInfo(ctx *cli.Context) error {
 	fatalIf(err, "Unable to initialize admin connection.")
 
 	group := args.Get(1)
-	gd, err1 := client.GetGroupDescription(globalContext, group)
-	fatalIf(probe.NewError(err1).Trace(args...), "Could not get group info")
+	gd, e := client.GetGroupDescription(globalContext, group)
+	fatalIf(probe.NewError(e).Trace(args...), "Unable to fetch group info")
 
 	printMsg(groupMessage{
-		op:          "info",
+		op:          ctx.Command.Name,
 		GroupName:   group,
 		GroupStatus: gd.Status,
 		GroupPolicy: gd.Policy,

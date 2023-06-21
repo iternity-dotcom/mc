@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -108,7 +108,7 @@ EXAMPLES:
 // checkAdminBucketQuotaSyntax - validate all the passed arguments
 func checkAdminBucketQuotaSyntax(ctx *cli.Context) {
 	if len(ctx.Args()) == 0 || len(ctx.Args()) > 1 {
-		cli.ShowCommandHelpAndExit(ctx, ctx.Command.Name, 1) // last argument is exit code
+		showCommandHelpAndExit(ctx, 1) // last argument is exit code
 	}
 }
 
@@ -133,22 +133,25 @@ func mainAdminBucketQuota(ctx *cli.Context) error {
 		quotaStr := ctx.String("hard")
 		quota, e := humanize.ParseBytes(quotaStr)
 		fatalIf(probe.NewError(e).Trace(quotaStr), "Unable to parse quota")
-		if e = client.SetBucketQuota(globalContext, targetURL, &madmin.BucketQuota{Quota: quota, Type: qType}); e != nil {
-			fatalIf(probe.NewError(e).Trace(args...), "Unable to set bucket quota")
-		}
+
+		fatalIf(probe.NewError(client.SetBucketQuota(globalContext, targetURL, &madmin.BucketQuota{
+			Quota: quota,
+			Type:  qType,
+		})).Trace(args...), "Unable to set bucket quota")
+
 		printMsg(quotaMessage{
-			op:        "set",
+			op:        ctx.Command.Name,
 			Bucket:    targetURL,
 			Quota:     quota,
 			QuotaType: string(qType),
 			Status:    "success",
 		})
 	} else if ctx.Bool("clear") {
-		if err := client.SetBucketQuota(globalContext, targetURL, &madmin.BucketQuota{}); err != nil {
-			fatalIf(probe.NewError(err).Trace(args...), "Unable to clear bucket quota config")
+		if e := client.SetBucketQuota(globalContext, targetURL, &madmin.BucketQuota{}); e != nil {
+			fatalIf(probe.NewError(e).Trace(args...), "Unable to clear bucket quota config")
 		}
 		printMsg(quotaMessage{
-			op:     "unset",
+			op:     ctx.Command.Name,
 			Bucket: targetURL,
 			Status: "success",
 		})
@@ -157,7 +160,7 @@ func mainAdminBucketQuota(ctx *cli.Context) error {
 		qCfg, e := client.GetBucketQuota(globalContext, targetURL)
 		fatalIf(probe.NewError(e).Trace(args...), "Unable to get bucket quota")
 		printMsg(quotaMessage{
-			op:        "get",
+			op:        ctx.Command.Name,
 			Bucket:    targetURL,
 			Quota:     qCfg.Quota,
 			QuotaType: string(qCfg.Type),

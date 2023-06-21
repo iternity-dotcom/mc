@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -20,6 +20,7 @@ package cmd
 import "github.com/minio/cli"
 
 var adminTopSubcommands = []cli.Command{
+	adminTopAPICmd,
 	adminTopLocksCmd,
 }
 

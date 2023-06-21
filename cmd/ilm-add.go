@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -50,23 +50,34 @@ DESCRIPTION:
 
 EXAMPLES:
   1. Add a lifecycle rule with an expiration action for all objects in mybucket.
-     {{.Prompt}} {{.HelpName}} --expiry-days "200" myminio/mybucket
+     {{.Prompt}} {{.HelpName}} --expire-days "200" myminio/mybucket
 
   2. Add a lifecycle rule with a transition and a noncurrent version transition action for objects with prefix doc/ in mybucket.
-     {{.Prompt}} {{.HelpName}} --transition-days "90" --storage-class "MINIOTIER-1" \
-          --noncurrentversion-transition-days "45" --noncurrentversion-transition-storage-class "MINIOTIER2" \
-          myminio/mybucket/doc
+     Tiers must exist in MinIO. Use existing tiers or add new tiers.
+     {{.Prompt}} mc tier add minio myminio MINIOTIER-1 --endpoint https://warm-minio-1.com \
+         --access-key ACCESSKEY --secret-key SECRETKEY --bucket bucket1 --prefix prefix1
+
+     {{.Prompt}} mc tier add minio myminio MINIOTIER-2 --endpoint https://warm-minio-2.com \
+         --access-key ACCESSKEY --secret-key SECRETKEY --bucket bucket2 --prefix prefix2
+
+     {{.Prompt}} {{.HelpName}} --prefix "doc/" --transition-days "90" --transition-tier "MINIOTIER-1" \
+          --noncurrent-transition-days "45" --noncurrent-transition-tier "MINIOTIER-2" \
+          myminio/mybucket/
 
   3. Add a lifecycle rule with an expiration and a noncurrent version expiration action for all objects with prefix doc/ in mybucket.
-     {{.Prompt}} {{.HelpName}} --expiry-days "300" --noncurrentversion-expiration-days "100" \
-          myminio/mybucket/doc
+     {{.Prompt}} {{.HelpName}} --prefix "doc/" --expire-days "300" --noncurrent-expire-days "100" \
+          myminio/mybucket/
 `,
 }
 
 var ilmAddFlags = []cli.Flag{
 	cli.StringFlag{
+		Name:  "prefix",
+		Usage: "object prefix",
+	},
+	cli.StringFlag{
 		Name:  "tags",
-		Usage: "format '<key1>=<value1>&<key2>=<value2>&<key3>=<value3>', multiple values allowed for multiple key/value pairs",
+		Usage: "key value pairs of the form '<key1>=<value1>&<key2>=<value2>&<key3>=<value3>'",
 	},
 	cli.StringFlag{
 		Name:   "expiry-date",
@@ -74,8 +85,22 @@ var ilmAddFlags = []cli.Flag{
 		Hidden: true,
 	},
 	cli.StringFlag{
-		Name:  "expiry-days",
-		Usage: "the number of days to expiration",
+		Name:   "expiry-days",
+		Usage:  "the number of days to expiration",
+		Hidden: true,
+	},
+	cli.StringFlag{
+		Name:  "expire-days",
+		Usage: "number of days to expire",
+	},
+	cli.BoolFlag{
+		Name:   "expired-object-delete-marker",
+		Usage:  "remove delete markers with no parallel versions",
+		Hidden: true,
+	},
+	cli.BoolFlag{
+		Name:  "expire-delete-marker",
+		Usage: "expire zombie delete markers",
 	},
 	cli.StringFlag{
 		Name:   "transition-date",
@@ -84,27 +109,71 @@ var ilmAddFlags = []cli.Flag{
 	},
 	cli.StringFlag{
 		Name:  "transition-days",
-		Usage: "the number of days to transition",
+		Usage: "number of days to transition",
 	},
 	cli.StringFlag{
-		Name:  "storage-class",
-		Usage: "storage class for current version to transition into. MinIO supports any warm tier configured via `mc-admin-tier-add`",
-	},
-	cli.BoolFlag{
-		Name:  "expired-object-delete-marker",
-		Usage: "remove delete markers with no parallel versions",
-	},
-	cli.IntFlag{
-		Name:  "noncurrentversion-expiration-days",
-		Usage: "the number of days to remove noncurrent versions",
-	},
-	cli.IntFlag{
-		Name:  "noncurrentversion-transition-days",
-		Usage: "the number of days to transition noncurrent versions",
+		Name:   "storage-class",
+		Usage:  "storage class for current version to transition into. MinIO supports tiers configured via `mc-admin-tier-add`.",
+		Hidden: true,
 	},
 	cli.StringFlag{
-		Name:  "noncurrentversion-transition-storage-class",
-		Usage: "storage class for noncurrent versions to transition into",
+		Name:   "tier",
+		Usage:  "remote tier where current versions transition to",
+		Hidden: true,
+	},
+	cli.StringFlag{
+		Name:  "transition-tier",
+		Usage: "remote tier name to transition",
+	},
+	cli.IntFlag{
+		Name:   "noncurrentversion-expiration-days",
+		Usage:  "the number of days to remove noncurrent versions",
+		Hidden: true,
+	},
+	cli.StringFlag{
+		Name:  "noncurrent-expire-days",
+		Usage: "number of days to expire noncurrent versions",
+	},
+	cli.IntFlag{
+		Name:   "newer-noncurrentversions-expiration",
+		Usage:  "the number of noncurrent versions to retain",
+		Hidden: true,
+	},
+	cli.IntFlag{
+		Name:  "noncurrent-expire-newer",
+		Usage: "number of newer noncurrent versions to retain",
+	},
+	cli.IntFlag{
+		Name:   "noncurrentversion-transition-days",
+		Usage:  "the number of days to transition noncurrent versions",
+		Hidden: true,
+	},
+	cli.IntFlag{
+		Name:  "noncurrent-transition-days",
+		Usage: "number of days to transition noncurrent versions",
+	},
+	cli.IntFlag{
+		Name:   "newer-noncurrentversions-transition",
+		Usage:  "the number of noncurrent versions to retain. If there are this many more recent noncurrent versions they will be transitioned",
+		Hidden: true,
+	},
+	cli.IntFlag{
+		Name:  "noncurrent-transition-newer",
+		Usage: "number of noncurrent versions to retain in hot tier",
+	},
+	cli.StringFlag{
+		Name:   "noncurrentversion-transition-storage-class",
+		Usage:  "storage class for noncurrent versions to transition into",
+		Hidden: true,
+	},
+	cli.StringFlag{
+		Name:   "noncurrentversion-tier",
+		Usage:  "remote tier where noncurrent versions transition to",
+		Hidden: true,
+	},
+	cli.StringFlag{
+		Name:  "noncurrent-transition-tier",
+		Usage: "remote tier name to transition",
 	},
 }
 
@@ -127,7 +196,7 @@ func (i ilmAddMessage) JSON() string {
 // Validate user given arguments
 func checkILMAddSyntax(ctx *cli.Context) {
 	if len(ctx.Args()) != 1 {
-		cli.ShowCommandHelpAndExit(ctx, "add", globalErrorExitStatus)
+		showCommandHelpAndExit(ctx, globalErrorExitStatus)
 	}
 }
 
@@ -157,8 +226,10 @@ func mainILMAdd(cliCtx *cli.Context) error {
 	opts, err := ilm.GetLifecycleOptions(cliCtx)
 	fatalIf(err.Trace(args...), "Unable to generate new lifecycle rules for the input")
 
-	lfcCfg, err = opts.ToConfig(lfcCfg)
+	newRule, err := opts.ToILMRule(lfcCfg)
 	fatalIf(err.Trace(args...), "Unable to generate new lifecycle rules for the input")
+
+	lfcCfg.Rules = append(lfcCfg.Rules, newRule)
 
 	fatalIf(client.SetLifecycle(ctx, lfcCfg).Trace(urlStr), "Unable to add this lifecycle rule")
 

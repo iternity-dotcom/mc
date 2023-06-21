@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -27,7 +27,6 @@ import (
 	"github.com/minio/cli"
 	"github.com/minio/mc/pkg/probe"
 	"github.com/minio/pkg/console"
-	"maze.io/x/duration"
 )
 
 // ls specific flags.
@@ -140,7 +139,7 @@ func parseRewindFlag(rewind string) (timeRef time.Time) {
 
 		if timeRef.IsZero() {
 			// rewind is not parsed, check if it is a duration instead
-			if duration, e := duration.ParseDuration(rewind); e == nil {
+			if duration, e := ParseDuration(rewind); e == nil {
 				if duration < 0 {
 					fatalIf(probe.NewError(errors.New("negative duration is not supported")),
 						"Unable to parse --rewind argument")
@@ -176,9 +175,6 @@ func checkListSyntax(ctx context.Context, cliCtx *cli.Context) ([]string, doList
 	listZip := cliCtx.Bool("zip")
 
 	timeRef := parseRewindFlag(cliCtx.String("rewind"))
-	if timeRef.IsZero() && withOlderVersions {
-		timeRef = time.Now().UTC()
-	}
 
 	if listZip && (withOlderVersions || !timeRef.IsZero()) {
 		fatalIf(errInvalidArgument().Trace(args...), "Zip file listing can only be performed on the latest version")

@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -128,7 +128,7 @@ var (
 	}
 )
 
-//  Mirror folders recursively from a single source to many destinations
+// Mirror folders recursively from a single source to many destinations
 var mirrorCmd = cli.Command{
 	Name:         "mirror",
 	Usage:        "synchronize object(s) to a remote site",
@@ -432,7 +432,7 @@ func (mj *mirrorJob) doMirror(ctx context.Context, sURLs URLs) URLs {
 	targetURL := sURLs.TargetContent.URL
 	length := sURLs.SourceContent.Size
 
-	mj.status.SetCaption(sourceURL.String() + ": ")
+	mj.status.SetCaption(sourceURL.String() + ":")
 
 	// Initialize target metadata.
 	sURLs.TargetContent.Metadata = make(map[string]string)

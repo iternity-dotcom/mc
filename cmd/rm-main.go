@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -180,10 +180,12 @@ type rmMessage struct {
 
 // Colorized message for console printing.
 func (r rmMessage) String() string {
-	msg := console.Colorize("Remove", fmt.Sprintf("Removing `%s`", r.Key))
+	msg := "Removed "
+
 	if r.DeleteMarker {
-		msg = console.Colorize("Remove", fmt.Sprintf("Creating delete marker `%s`", r.Key))
+		msg = "Created delete marker "
 	}
+	msg += console.Colorize("Removed", fmt.Sprintf("`%s`", r.Key))
 	if r.VersionID != "" {
 		msg += fmt.Sprintf(" (versionId=%s)", r.VersionID)
 	}
@@ -255,7 +257,7 @@ func checkRmSyntax(ctx context.Context, cliCtx *cli.Context, encKeyDB map[string
 	}
 	if !cliCtx.Args().Present() && !isStdin {
 		exitCode := 1
-		cli.ShowCommandHelpAndExit(cliCtx, "rm", exitCode)
+		showCommandHelpAndExit(cliCtx, exitCode)
 	}
 
 	// For all recursive or versions bulk deletion operations make sure to check for 'force' flag.
@@ -355,6 +357,8 @@ func removeSingle(url, versionID string, opts removeOpts) error {
 			}
 			printMsg(msg)
 		}
+	} else {
+		printDryRunMsg(content)
 	}
 	return nil
 }
@@ -386,9 +390,10 @@ func printDryRunMsg(content *ClientContent) {
 }
 
 // listAndRemove uses listing before removal, it can list recursively or not, with versions or not.
-//   Use cases:
-//      * Remove objects recursively
-//      * Remove all versions of a single object
+//
+//	Use cases:
+//	   * Remove objects recursively
+//	   * Remove all versions of a single object
 func listAndRemove(url string, opts removeOpts) error {
 	ctx, cancelRemove := context.WithCancel(globalContext)
 	defer cancelRemove()
@@ -536,10 +541,14 @@ func listAndRemove(url string, opts removeOpts) error {
 					if result.Err != nil {
 						errorIf(result.Err.Trace(path),
 							"Failed to remove `"+path+"`.")
-						switch result.Err.ToGoError().(type) {
+						switch e := result.Err.ToGoError().(type) {
 						case PathInsufficientPermission:
 							// Ignore Permission error.
 							continue
+						case minio.ErrorResponse:
+							if strings.Contains(e.Message, "Object is WORM protected and cannot be overwritten") {
+								continue
+							}
 						}
 						close(contentCh)
 						return exitStatus(globalErrorExitStatus)
@@ -688,7 +697,7 @@ func mainRm(cliCtx *cli.Context) error {
 	}
 
 	// Set color.
-	console.SetColor("Remove", color.New(color.FgGreen, color.Bold))
+	console.SetColor("Removed", color.New(color.FgGreen, color.Bold))
 
 	var rerr error
 	var e error

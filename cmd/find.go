@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -58,19 +58,23 @@ func (f findMessage) JSON() string {
 // also proceed to look for similar strings alone and print it.
 //
 // pattern:
-// 	{ term }
-// term:
-// 	'*'         matches any sequence of non-Separator characters
-// 	'?'         matches any single non-Separator character
-// 	'[' [ '^' ] { character-range } ']'
-// 	            character class (must be non-empty)
-// 	c           matches character c (c != '*', '?', '\\', '[')
-// 	'\\' c      matches character c
-// character-range:
-// 	c           matches character c (c != '\\', '-', ']')
-// 	'\\' c      matches character c
-// 	lo '-' hi   matches character c for lo <= c <= hi
 //
+//	{ term }
+//
+// term:
+//
+//	'*'         matches any sequence of non-Separator characters
+//	'?'         matches any single non-Separator character
+//	'[' [ '^' ] { character-range } ']'
+//	            character class (must be non-empty)
+//	c           matches character c (c != '*', '?', '\\', '[')
+//	'\\' c      matches character c
+//
+// character-range:
+//
+//	c           matches character c (c != '\\', '-', ']')
+//	'\\' c      matches character c
+//	lo '-' hi   matches character c for lo <= c <= hi
 func nameMatch(pattern, path string) bool {
 	matched, e := filepath.Match(pattern, filepath.Base(path))
 	errorIf(probe.NewError(e).Trace(pattern, path), "Unable to match with input pattern.")
@@ -83,6 +87,12 @@ func nameMatch(pattern, path string) bool {
 		}
 	}
 	return matched
+}
+
+func headerMatch(pattern, header string) bool {
+	pattern = strings.ToLower(pattern)
+	header = strings.ToLower(header)
+	return wildcard.Match(pattern, header)
 }
 
 // pathMatch reports whether path matches the wildcard pattern.
@@ -324,62 +334,62 @@ func stringsReplace(ctx context.Context, args string, fileContent contentMessage
 	// replace all instances of {}
 	str := args
 	if strings.Contains(str, "{}") {
-		str = strings.Replace(str, "{}", fileContent.Key, -1)
+		str = strings.ReplaceAll(str, "{}", fileContent.Key)
 	}
 
 	// replace all instances of {""}
 	if strings.Contains(str, `{""}`) {
-		str = strings.Replace(str, `{""}`, strconv.Quote(fileContent.Key), -1)
+		str = strings.ReplaceAll(str, `{""}`, strconv.Quote(fileContent.Key))
 	}
 
 	// replace all instances of {base}
 	if strings.Contains(str, "{base}") {
-		str = strings.Replace(str, "{base}", filepath.Base(fileContent.Key), -1)
+		str = strings.ReplaceAll(str, "{base}", filepath.Base(fileContent.Key))
 	}
 
 	// replace all instances of {"base"}
 	if strings.Contains(str, `{"base"}`) {
-		str = strings.Replace(str, `{"base"}`, strconv.Quote(filepath.Base(fileContent.Key)), -1)
+		str = strings.ReplaceAll(str, `{"base"}`, strconv.Quote(filepath.Base(fileContent.Key)))
 	}
 
 	// replace all instances of {dir}
 	if strings.Contains(str, "{dir}") {
-		str = strings.Replace(str, "{dir}", filepath.Dir(fileContent.Key), -1)
+		str = strings.ReplaceAll(str, "{dir}", filepath.Dir(fileContent.Key))
 	}
 
 	// replace all instances of {"dir"}
 	if strings.Contains(str, `{"dir"}`) {
-		str = strings.Replace(str, `{"dir"}`, strconv.Quote(filepath.Dir(fileContent.Key)), -1)
+		str = strings.ReplaceAll(str, `{"dir"}`, strconv.Quote(filepath.Dir(fileContent.Key)))
 	}
 
 	// replace all instances of {size}
 	if strings.Contains(str, "{size}") {
-		str = strings.Replace(str, "{size}", humanize.IBytes(uint64(fileContent.Size)), -1)
+		str = strings.ReplaceAll(str, "{size}", humanize.IBytes(uint64(fileContent.Size)))
 	}
 
 	// replace all instances of {"size"}
 	if strings.Contains(str, `{"size"}`) {
-		str = strings.Replace(str, `{"size"}`, strconv.Quote(humanize.IBytes(uint64(fileContent.Size))), -1)
+		str = strings.ReplaceAll(str, `{"size"}`, strconv.Quote(humanize.IBytes(uint64(fileContent.Size))))
 	}
 
 	// replace all instances of {time}
 	if strings.Contains(str, "{time}") {
-		str = strings.Replace(str, "{time}", fileContent.Time.Format(printDate), -1)
+		str = strings.ReplaceAll(str, "{time}", fileContent.Time.Format(printDate))
 	}
 
 	// replace all instances of {"time"}
 	if strings.Contains(str, `{"time"}`) {
-		str = strings.Replace(str, `{"time"}`, strconv.Quote(fileContent.Time.Format(printDate)), -1)
+		str = strings.ReplaceAll(str, `{"time"}`, strconv.Quote(fileContent.Time.Format(printDate)))
 	}
 
 	// replace all instances of {url}
 	if strings.Contains(str, "{url}") {
-		str = strings.Replace(str, "{url}", getShareURL(ctx, fileContent.Key), -1)
+		str = strings.ReplaceAll(str, "{url}", getShareURL(ctx, fileContent.Key))
 	}
 
 	// replace all instances of {"url"}
 	if strings.Contains(str, `{"url"}`) {
-		str = strings.Replace(str, `{"url"}`, strconv.Quote(getShareURL(ctx, fileContent.Key)), -1)
+		str = strings.ReplaceAll(str, `{"url"}`, strconv.Quote(getShareURL(ctx, fileContent.Key)))
 	}
 
 	return str

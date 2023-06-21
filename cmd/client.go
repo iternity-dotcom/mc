@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -45,9 +45,10 @@ const (
 
 // GetOptions holds options of the GET operation
 type GetOptions struct {
-	SSE       encrypt.ServerSide
-	VersionID string
-	Zip       bool
+	SSE        encrypt.ServerSide
+	VersionID  string
+	Zip        bool
+	RangeStart int64
 }
 
 // PutOptions holds options for PUT operation
@@ -172,6 +173,10 @@ type Client interface {
 
 	// Restore an object
 	Restore(ctx context.Context, versionID string, days int) *probe.Error
+
+	// OD operations
+	GetPart(ctx context.Context, part int) (io.ReadCloser, *probe.Error)
+	PutPart(ctx context.Context, reader io.Reader, size int64, progress io.Reader, opts PutOptions) (n int64, err *probe.Error)
 }
 
 // ClientContent - Content container for content metadata
@@ -208,17 +213,19 @@ type ClientContent struct {
 
 // Config - see http://docs.amazonwebservices.com/AmazonS3/latest/dev/index.html?RESTAuthentication.html
 type Config struct {
-	AccessKey    string
-	SecretKey    string
-	SessionToken string
-	Signature    string
-	HostURL      string
-	AppName      string
-	AppVersion   string
-	Debug        bool
-	Insecure     bool
-	Lookup       minio.BucketLookupType
-	Transport    *http.Transport
+	AccessKey         string
+	SecretKey         string
+	SessionToken      string
+	Signature         string
+	HostURL           string
+	AppName           string
+	AppVersion        string
+	Debug             bool
+	Insecure          bool
+	Lookup            minio.BucketLookupType
+	ConnReadDeadline  time.Duration
+	ConnWriteDeadline time.Duration
+	Transport         *http.Transport
 }
 
 // SelectObjectOpts - opts entered for select API

@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -19,21 +19,29 @@ package cmd
 
 import (
 	"github.com/minio/cli"
-	"github.com/minio/pkg/console"
 )
 
-var adminSpeedtestCmd = cli.Command{
-	Name:               "speedtest",
-	Usage:              "Run server side speed test",
-	Action:             mainAdminSpeedtest,
-	OnUsageError:       onUsageError,
-	Before:             setGlobalsFromContext,
-	HideHelpCommand:    true,
-	Hidden:             true,
-	CustomHelpTemplate: "Please use 'mc support perf'",
+var supportProxySubcommands = []cli.Command{
+	supportProxySetCmd,
+	supportProxyRemoveCmd,
+	supportProxyShowCmd,
 }
 
-func mainAdminSpeedtest(ctx *cli.Context) error {
-	console.Infoln("Please use 'mc support perf'")
+var supportProxyCmd = cli.Command{
+	Name:            "proxy",
+	Usage:           "configure proxy",
+	Action:          mainSupportProxy,
+	OnUsageError:    onUsageError,
+	Before:          setGlobalsFromContext,
+	Flags:           supportGlobalFlags,
+	Subcommands:     supportProxySubcommands,
+	HideHelpCommand: true,
+}
+
+// mainSupportProxy is the handler for "mc support proxy" command.
+func mainSupportProxy(ctx *cli.Context) error {
+	commandNotFound(ctx, supportProxySubcommands)
 	return nil
+	// Sub-commands like "set", "remove", "show" have their own main.
+	// Check for command syntax
 }

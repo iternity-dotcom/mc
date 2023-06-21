@@ -18,13 +18,25 @@
 package cmd
 
 import (
+	"strings"
+
 	"github.com/minio/cli"
+	json "github.com/minio/colorjson"
+	"github.com/minio/madmin-go"
+	"github.com/minio/mc/pkg/probe"
+	"github.com/minio/pkg/console"
 )
 
-var callhomeSubcommands = []cli.Command{
-	callhomeSetCmd,
-	callhomeGetCmd,
-}
+var supportCallhomeFlags = append([]cli.Flag{
+	cli.BoolFlag{
+		Name:  "logs",
+		Usage: "push logs to SUBNET in real-time",
+	},
+	cli.BoolFlag{
+		Name:  "diag",
+		Usage: "push diagnostics info to SUBNET every 24hrs",
+	},
+}, supportGlobalFlags...)
 
 var supportCallhomeCmd = cli.Command{
 	Name:         "callhome",
@@ -32,13 +44,172 @@ var supportCallhomeCmd = cli.Command{
 	OnUsageError: onUsageError,
 	Action:       mainCallhome,
 	Before:       setGlobalsFromContext,
-	Flags:        globalFlags,
-	Hidden:       true,
-	Subcommands:  callhomeSubcommands,
+	Flags:        supportCallhomeFlags,
+	CustomHelpTemplate: `NAME:
+  {{.HelpName}} - {{.Usage}}
+
+USAGE:
+  {{.HelpName}} enable|disable|status ALIAS
+
+OPTIONS:
+  enable - Enable callhome
+  disable - Disable callhome
+  status - Display callhome settings
+
+FLAGS:
+  {{range .VisibleFlags}}{{.}}
+  {{end}}
+EXAMPLES:
+  1. Enable callhome for cluster with alias 'myminio'
+     {{.Prompt}} {{.HelpName}} enable myminio
+
+  2. Disable callhome for cluster with alias 'myminio'
+     {{.Prompt}} {{.HelpName}} disable myminio
+
+  3. Check callhome status for cluster with alias 'myminio'
+     {{.Prompt}} {{.HelpName}} status myminio
+
+  4. Enable diagnostics callhome for cluster with alias 'myminio'
+     {{.Prompt}} {{.HelpName}} enable myminio --diag
+
+  5. Disable logs callhome for cluster with alias 'myminio'
+     {{.Prompt}} {{.HelpName}} disable myminio --logs
+
+  6. Check logs callhome status for cluster with alias 'myminio'
+     {{.Prompt}} {{.HelpName}} status myminio --logs
+`,
+}
+
+type supportCallhomeMessage struct {
+	Status  string `json:"status"`
+	Diag    string `json:"diag,omitempty"`
+	Logs    string `json:"logs,omitempty"`
+	Feature string `json:"-"`
+	Action  string `json:"-"`
+}
+
+// String colorized callhome command output message.
+func (s supportCallhomeMessage) String() string {
+	var msg string
+	if s.Action == "status" {
+		msgs := []string{}
+		if len(s.Diag) > 0 {
+			msgs = append(msgs, "Diagnostics is "+s.Diag)
+		}
+		if len(s.Logs) > 0 {
+			msgs = append(msgs, "Logs is "+s.Logs)
+		}
+		msg = strings.Join(msgs, "\n")
+	} else {
+		msg = s.Feature + " is now " + s.Action
+	}
+	return console.Colorize(supportSuccessMsgTag, msg)
+}
+
+// JSON jsonified callhome command output message.
+func (s supportCallhomeMessage) JSON() string {
+	s.Status = "success"
+	jsonBytes, e := json.MarshalIndent(s, "", " ")
+	fatalIf(probe.NewError(e), "Unable to marshal into JSON.")
+
+	return string(jsonBytes)
+}
+
+func isDiagCallhomeEnabled(alias string) bool {
+	return isFeatureEnabled(alias, "callhome", madmin.Default)
 }
 
 func mainCallhome(ctx *cli.Context) error {
-	commandNotFound(ctx, callhomeSubcommands)
+	setSuccessMessageColor()
+	alias, arg := checkToggleCmdSyntax(ctx, "callhome")
+
+	diag, logs := parseCallhomeFlags(ctx)
+
+	if arg == "status" {
+		printCallhomeStatus(alias, diag, logs)
+		return nil
+	}
+
+	toggleCallhome(alias, arg == "enable", diag, logs)
+
 	return nil
-	// Sub-commands like "set", "get" have their own main.
+}
+
+func parseCallhomeFlags(ctx *cli.Context) (diag bool, logs bool) {
+	diag = ctx.Bool("diag")
+	logs = ctx.Bool("logs")
+
+	if !diag && !logs {
+		// When both flags are not passed, apply the action to both
+		diag = true
+		logs = true
+	}
+
+	return diag, logs
+}
+
+func printCallhomeStatus(alias string, diag bool, logs bool) {
+	resultMsg := supportCallhomeMessage{Action: "status"}
+	if diag {
+		resultMsg.Diag = featureStatusStr(isDiagCallhomeEnabled(alias))
+	}
+
+	if logs {
+		resultMsg.Logs = featureStatusStr(isLogsCallhomeEnabled(alias))
+	}
+	printMsg(resultMsg)
+}
+
+func toggleCallhome(alias string, enable bool, diag bool, logs bool) {
+	newStatus := featureStatusStr(enable)
+	resultMsg := supportCallhomeMessage{
+		Action:  newStatus,
+		Feature: getFeature(diag, logs),
+	}
+
+	if enable {
+		validateClusterRegistered(alias, true)
+	}
+
+	if diag {
+		setCallhomeConfig(alias, enable)
+		resultMsg.Diag = newStatus
+	}
+
+	if logs {
+		configureSubnetWebhook(alias, enable)
+		resultMsg.Logs = newStatus
+	}
+
+	printMsg(resultMsg)
+}
+
+func getFeature(diag bool, logs bool) string {
+	if diag && logs {
+		return "Diagnostics and logs callhome"
+	}
+
+	if diag {
+		return "Diagnostics"
+	}
+
+	return "Logs"
+}
+
+func setCallhomeConfig(alias string, enableCallhome bool) {
+	// Create a new MinIO Admin Client
+	client, err := newAdminClient(alias)
+	fatalIf(err, "Unable to initialize admin connection.")
+
+	if !minioConfigSupportsSubSys(client, "callhome") {
+		fatal(errDummy().Trace(), "Your version of MinIO doesn't support this configuration")
+	}
+
+	enableStr := "off"
+	if enableCallhome {
+		enableStr = "on"
+	}
+	configStr := "callhome enable=" + enableStr
+	_, e := client.SetConfigKV(globalContext, configStr)
+	fatalIf(probe.NewError(e), "Unable to set callhome config on minio")
 }

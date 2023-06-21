@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -131,9 +131,8 @@ func parseTreeSyntax(ctx context.Context, cliCtx *cli.Context) (args []string, d
 	}
 
 	for _, url := range args {
-		if _, _, err := url2Stat(ctx, url, "", false, nil, timeRef, false); err != nil && !isURLPrefixExists(url, false) {
-			fatalIf(err.Trace(url), "Unable to tree `"+url+"`.")
-		}
+		_, _, err := url2Stat(ctx, url, "", false, nil, timeRef, false)
+		fatalIf(err.Trace(url), "Unable to tree `"+url+"`.")
 	}
 	return
 }

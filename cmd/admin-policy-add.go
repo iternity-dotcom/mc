@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -60,7 +60,7 @@ EXAMPLES:
 // checkAdminPolicyAddSyntax - validate all the passed arguments
 func checkAdminPolicyAddSyntax(ctx *cli.Context) {
 	if len(ctx.Args()) != 3 {
-		cli.ShowCommandHelpAndExit(ctx, "add", 1) // last argument is exit code
+		showCommandHelpAndExit(ctx, 1) // last argument is exit code
 	}
 }
 
@@ -92,11 +92,7 @@ func (u userPolicyMessage) String() string {
 		fatalIf(probe.NewError(e), "Unable to marshal to JSON.")
 		return string(buf)
 	case "list":
-		policyFieldMaxLen := 20
-		// Create a new pretty table with cols configuration
-		return newPrettyTable("  ",
-			Field{"Policy", policyFieldMaxLen},
-		).buildRow(u.Policy)
+		return console.Colorize("PolicyName", u.Policy)
 	case "remove":
 		return console.Colorize("PolicyMessage", "Removed policy `"+u.Policy+"` successfully.")
 	case "add":
@@ -140,7 +136,7 @@ func mainAdminPolicyAdd(ctx *cli.Context) error {
 	fatalIf(probe.NewError(client.AddCannedPolicy(globalContext, args.Get(1), policy)).Trace(args...), "Unable to add new policy")
 
 	printMsg(userPolicyMessage{
-		op:     "add",
+		op:     ctx.Command.Name,
 		Policy: args.Get(1),
 	})
 

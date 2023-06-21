@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -52,7 +52,7 @@ EXAMPLES:
 // checkAdminUserPolicySyntax - validate all the passed arguments
 func checkAdminUserPolicySyntax(ctx *cli.Context) {
 	if len(ctx.Args()) != 2 {
-		cli.ShowCommandHelpAndExit(ctx, "policy", 1) // last argument is exit code
+		showCommandHelpAndExit(ctx, 1) // last argument is exit code
 	}
 }
 
@@ -74,6 +74,9 @@ func mainAdminUserPolicy(ctx *cli.Context) error {
 	fatalIf(probe.NewError(e).Trace(args...), "Unable to get user info")
 
 	pinfo, e := getPolicyInfo(client, user.PolicyName)
+	if user.PolicyName == "" {
+		e = fmt.Errorf("Policy not found for user %s", args.Get(1))
+	}
 	fatalIf(probe.NewError(e).Trace(args...), "Unable to fetch user policy document")
 
 	fmt.Println(string(pinfo.Policy))

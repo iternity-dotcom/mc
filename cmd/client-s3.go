@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -38,6 +38,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/minio/mc/pkg/deadlineconn"
 	"github.com/minio/mc/pkg/httptracer"
 	"github.com/minio/mc/pkg/probe"
 	"github.com/minio/minio-go/v7"
@@ -87,6 +88,29 @@ const (
 	// AmzObjectLockLegalHold sets object lock legal hold
 	AmzObjectLockLegalHold = "X-Amz-Object-Lock-Legal-Hold"
 )
+
+type dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
+
+// newCustomDialContext setups a custom dialer for any external communication and proxies.
+func newCustomDialContext(c *Config) dialContext {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dialer := &net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 15 * time.Second,
+		}
+
+		conn, err := dialer.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+
+		dconn := deadlineconn.New(conn).
+			WithReadDeadline(c.ConnReadDeadline).
+			WithWriteDeadline(c.ConnWriteDeadline)
+
+		return dconn, nil
+	}
+}
 
 var timeSentinel = time.Unix(0, 0).UTC()
 
@@ -145,12 +169,11 @@ func newFactory() func(config *Config) (Client, *probe.Error) {
 				transport = config.Transport
 			} else {
 				tr := &http.Transport{
-					Proxy: http.ProxyFromEnvironment,
-					DialContext: (&net.Dialer{
-						Timeout:   10 * time.Second,
-						KeepAlive: 15 * time.Second,
-					}).DialContext,
-					MaxIdleConnsPerHost:   256,
+					Proxy:                 http.ProxyFromEnvironment,
+					DialContext:           newCustomDialContext(config),
+					MaxIdleConnsPerHost:   1024,
+					WriteBufferSize:       32 << 10, // 32KiB moving up from 4KiB default
+					ReadBufferSize:        32 << 10, // 32KiB moving up from 4KiB default
 					IdleConnTimeout:       90 * time.Second,
 					TLSHandshakeTimeout:   10 * time.Second,
 					ExpectContinueTimeout: 10 * time.Second,
@@ -829,6 +852,12 @@ func (c *S3Client) Get(ctx context.Context, opts GetOptions) (io.ReadCloser, *pr
 	if opts.Zip {
 		o.Set("x-minio-extract", "true")
 	}
+	if opts.RangeStart != 0 {
+		err := o.SetRange(opts.RangeStart, 0)
+		if err != nil {
+			return nil, probe.NewError(err)
+		}
+	}
 
 	reader, e := c.api.GetObject(ctx, bucket, object, o)
 	if e != nil {
@@ -1083,6 +1112,11 @@ func (c *S3Client) Put(ctx context.Context, reader io.Reader, size int64, progre
 		return ui.Size, probe.NewError(e)
 	}
 	return ui.Size, nil
+}
+
+// PutPart - upload an object with custom metadata. (Same as Put)
+func (c *S3Client) PutPart(ctx context.Context, reader io.Reader, size int64, progress io.Reader, putOpts PutOptions) (int64, *probe.Error) {
+	return c.Put(ctx, reader, size, progress, putOpts)
 }
 
 // Remove incomplete uploads.
@@ -1372,7 +1406,7 @@ func (c *S3Client) RemoveBucket(ctx context.Context, forceRemove bool) *probe.Er
 		return probe.NewError(BucketNameEmpty{})
 	}
 	if object != "" {
-		return errInvalidArgument()
+		return probe.NewError(BucketInvalid{c.joinPath(bucket, object)})
 	}
 
 	opts := minio.BucketOptions{ForceDelete: forceRemove}
@@ -1562,8 +1596,8 @@ func (c *S3Client) Stat(ctx context.Context, opts StatOptions) (*ClientContent, 
 	//     - /path/to/existing/object
 	//     - /path/to/existing_directory
 	//     - /path/to/existing_directory/
-	//     - /path/to/empty_directory
-	//     - /path/to/empty_directory/
+	//     - /path/to/directory_marker
+	//     - /path/to/directory_marker/
 
 	// First an HEAD call is issued, this is faster than doing listing even if the object exists
 	// because the list could be very large. At the same time, the HEAD call is avoided if the
@@ -1725,10 +1759,6 @@ func (c *S3Client) listVersions(ctx context.Context, b, o string, isRecursive bo
 }
 
 func (c *S3Client) listVersionsRoutine(ctx context.Context, b, o string, isRecursive bool, timeRef time.Time, includeOlderVersions, withDeleteMarkers bool, objectInfoCh chan minio.ObjectInfo) {
-	if timeRef.IsZero() {
-		timeRef = time.Now().UTC()
-	}
-
 	var buckets []string
 	if b == "" {
 		bucketsInfo, err := c.api.ListBuckets(ctx)
@@ -1763,7 +1793,7 @@ func (c *S3Client) listVersionsRoutine(ctx context.Context, b, o string, isRecur
 				continue
 			}
 
-			if objectVersion.LastModified.Before(timeRef) {
+			if timeRef.IsZero() || objectVersion.LastModified.Before(timeRef) {
 				skipKey = objectVersion.Key
 
 				// Skip if this is a delete marker and we are not asked to list it
@@ -1898,7 +1928,7 @@ func (c *S3Client) listIncompleteInRoutine(ctx context.Context, contentCh chan *
 				content := &ClientContent{}
 				url := c.targetURL.Clone()
 				// Join bucket with - incoming object key.
-				url.Path = c.joinPath(bucket.Name, object.Key)
+				url.Path = c.buildAbsPath(bucket.Name, object.Key)
 				switch {
 				case strings.HasSuffix(object.Key, string(c.targetURL.Separator)):
 					// We need to keep the trailing Separator, do not use filepath.Join().
@@ -1926,7 +1956,7 @@ func (c *S3Client) listIncompleteInRoutine(ctx context.Context, contentCh chan *
 			content := &ClientContent{}
 			url := c.targetURL.Clone()
 			// Join bucket with - incoming object key.
-			url.Path = c.joinPath(b, object.Key)
+			url.Path = c.buildAbsPath(b, object.Key)
 			switch {
 			case strings.HasSuffix(object.Key, string(c.targetURL.Separator)):
 				// We need to keep the trailing Separator, do not use filepath.Join().
@@ -1971,7 +2001,7 @@ func (c *S3Client) listIncompleteRecursiveInRoutine(ctx context.Context, content
 					return
 				}
 				url := c.targetURL.Clone()
-				url.Path = c.joinPath(bucket.Name, object.Key)
+				url.Path = c.buildAbsPath(bucket.Name, object.Key)
 				content := &ClientContent{}
 				content.URL = url
 				content.Size = object.Size
@@ -1995,7 +2025,7 @@ func (c *S3Client) listIncompleteRecursiveInRoutine(ctx context.Context, content
 			}
 			url := c.targetURL.Clone()
 			// Join bucket and incoming object key.
-			url.Path = c.joinPath(b, object.Key)
+			url.Path = c.buildAbsPath(b, object.Key)
 			content := &ClientContent{}
 			content.URL = url
 			content.Size = object.Size
@@ -2006,20 +2036,25 @@ func (c *S3Client) listIncompleteRecursiveInRoutine(ctx context.Context, content
 	}
 }
 
-// Returns new path by joining path segments with URL path separator.
+// Join bucket and object name, keep the leading slash for directory markers
 func (c *S3Client) joinPath(bucket string, objects ...string) string {
-	p := string(c.targetURL.Separator) + bucket
+	p := bucket
 	for _, o := range objects {
 		p += string(c.targetURL.Separator) + o
 	}
 	return p
 }
 
+// Build new absolute URL path by joining path segments with URL path separator.
+func (c *S3Client) buildAbsPath(bucket string, objects ...string) string {
+	return string(c.targetURL.Separator) + c.joinPath(bucket, objects...)
+}
+
 // Convert objectInfo to ClientContent
 func (c *S3Client) bucketInfo2ClientContent(bucket minio.BucketInfo) *ClientContent {
 	content := &ClientContent{}
 	url := c.targetURL.Clone()
-	url.Path = c.joinPath(bucket.Name)
+	url.Path = c.buildAbsPath(bucket.Name)
 	content.URL = url
 	content.BucketName = bucket.Name
 	content.Size = 0
@@ -2036,7 +2071,7 @@ func (c *S3Client) prefixInfo2ClientContent(bucket string, prefix string) *Clien
 	}
 	content := &ClientContent{}
 	url := c.targetURL.Clone()
-	url.Path = c.joinPath(bucket, prefix)
+	url.Path = c.buildAbsPath(bucket, prefix)
 	content.URL = url
 	content.BucketName = bucket
 	content.Type = os.ModeDir
@@ -2052,7 +2087,7 @@ func (c *S3Client) objectInfo2ClientContent(bucket string, entry minio.ObjectInf
 	if bucket == "" {
 		panic("should never happen, bucket cannot be empty")
 	}
-	url.Path = c.joinPath(bucket, entry.Key)
+	url.Path = c.buildAbsPath(bucket, entry.Key)
 	content.URL = url
 	content.BucketName = bucket
 	content.Size = entry.Size
@@ -2153,12 +2188,6 @@ func (c *S3Client) listInRoutine(ctx context.Context, contentCh chan *ClientCont
 				}
 				return
 			}
-
-			// Avoid sending an empty directory when we are specifically listing it
-			if strings.HasSuffix(object.Key, string(c.targetURL.Separator)) && o == object.Key {
-				continue
-			}
-
 			contentCh <- c.objectInfo2ClientContent(b, object)
 		}
 	}
@@ -2808,4 +2837,24 @@ func (c *S3Client) Restore(ctx context.Context, versionID string, days int) *pro
 		return probe.NewError(err)
 	}
 	return nil
+}
+
+// GetPart gets an object in a given number of parts
+func (c *S3Client) GetPart(ctx context.Context, part int) (io.ReadCloser, *probe.Error) {
+	bucket, object := c.url2BucketAndObject()
+	if bucket == "" {
+		return nil, probe.NewError(BucketNameEmpty{})
+	}
+	if object == "" {
+		return nil, probe.NewError(ObjectNameEmpty{})
+	}
+	getOO := minio.GetObjectOptions{}
+	if part > 0 {
+		getOO.PartNumber = part
+	}
+	reader, e := c.api.GetObject(ctx, bucket, object, getOO)
+	if e != nil {
+		return nil, probe.NewError(e)
+	}
+	return reader, nil
 }

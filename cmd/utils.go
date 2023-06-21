@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -38,7 +38,6 @@ import (
 	"github.com/minio/madmin-go"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/encrypt"
-	"maze.io/x/duration"
 
 	jwtgo "github.com/golang-jwt/jwt/v4"
 	"github.com/minio/mc/pkg/probe"
@@ -86,6 +85,13 @@ func newRandomID(n int) string {
 		sid[i] = letters[rand.Intn(len(letters))]
 	}
 	return string(sid)
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // randString generates random names and prepends them with a known prefix.
@@ -145,6 +151,8 @@ func NewS3Config(urlStr string, aliasCfg *aliasConfigV10) *Config {
 	s3Config.AppVersion = ReleaseTag
 	s3Config.Debug = globalDebug
 	s3Config.Insecure = globalInsecure
+	s3Config.ConnReadDeadline = globalConnReadDeadline
+	s3Config.ConnWriteDeadline = globalConnWriteDeadline
 
 	s3Config.HostURL = urlStr
 	if aliasCfg != nil {
@@ -152,8 +160,8 @@ func NewS3Config(urlStr string, aliasCfg *aliasConfigV10) *Config {
 		s3Config.SecretKey = aliasCfg.SecretKey
 		s3Config.SessionToken = aliasCfg.SessionToken
 		s3Config.Signature = aliasCfg.API
+		s3Config.Lookup = getLookupType(aliasCfg.Path)
 	}
-	s3Config.Lookup = getLookupType(aliasCfg.Path)
 	return s3Config
 }
 
@@ -177,7 +185,7 @@ func isOlder(ti time.Time, olderRef string) bool {
 		return false
 	}
 	objectAge := time.Since(ti)
-	olderThan, e := duration.ParseDuration(olderRef)
+	olderThan, e := ParseDuration(olderRef)
 	fatalIf(probe.NewError(e), "Unable to parse olderThan=`"+olderRef+"`.")
 	return objectAge < time.Duration(olderThan)
 }
@@ -189,7 +197,7 @@ func isNewer(ti time.Time, newerRef string) bool {
 	}
 
 	objectAge := time.Since(ti)
-	newerThan, e := duration.ParseDuration(newerRef)
+	newerThan, e := ParseDuration(newerRef)
 	fatalIf(probe.NewError(e), "Unable to parse newerThan=`"+newerRef+"`.")
 	return objectAge >= time.Duration(newerThan)
 }
