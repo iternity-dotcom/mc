@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -25,13 +25,14 @@ import (
 	"strings"
 	"time"
 
-	humanize "github.com/dustin/go-humanize"
+	"github.com/dustin/go-humanize"
 	"github.com/dustin/go-humanize/english"
 	"github.com/fatih/color"
 	"github.com/minio/cli"
 	json "github.com/minio/colorjson"
-	"github.com/minio/madmin-go"
+	"github.com/minio/madmin-go/v3"
 	"github.com/minio/mc/pkg/probe"
+	"github.com/minio/minio-go/v7/pkg/set"
 	"github.com/minio/pkg/console"
 )
 
@@ -57,6 +58,61 @@ EXAMPLES:
 `,
 }
 
+type poolSummary struct {
+	index          int
+	setsCount      int
+	drivesPerSet   int
+	driveTolerance int
+	endpoints      set.StringSet
+}
+
+type clusterInfo map[int]*poolSummary
+
+func clusterSummaryInfo(info madmin.InfoMessage) clusterInfo {
+	summary := make(clusterInfo)
+
+	for _, srv := range info.Servers {
+		for _, disk := range srv.Disks {
+			pool := summary[disk.PoolIndex]
+			if pool == nil {
+				pool = &poolSummary{
+					index:          disk.PoolIndex,
+					endpoints:      set.NewStringSet(),
+					driveTolerance: info.StandardParity(),
+				}
+			}
+			// Deprecated calculation based on disk location
+			if disk.SetIndex+1 > pool.setsCount {
+				pool.setsCount = disk.SetIndex + 1
+			}
+			// Deprecated calculation based on disk location
+			if disk.DiskIndex+1 > pool.drivesPerSet {
+				pool.drivesPerSet = disk.DiskIndex + 1
+			}
+			pool.endpoints.Add(srv.Endpoint)
+			summary[disk.PoolIndex] = pool
+		}
+	}
+
+	if len(info.Backend.TotalSets) > 0 { // Check if this is a recent enough MinIO version
+		for _, pool := range summary {
+			pool.setsCount = info.Backend.TotalSets[pool.index]
+			pool.drivesPerSet = info.Backend.DrivesPerSet[pool.index]
+		}
+	}
+	return summary
+}
+
+func endpointToPools(endpoint string, c clusterInfo) (pools []int) {
+	for poolNumber, poolSummary := range c {
+		if poolSummary.endpoints.Contains(endpoint) {
+			pools = append(pools, poolNumber)
+		}
+	}
+	sort.Ints(pools)
+	return
+}
+
 // Wrap "Info" message together with fields "Status" and "Error"
 type clusterStruct struct {
 	Status string             `json:"status"`
@@ -65,18 +121,20 @@ type clusterStruct struct {
 }
 
 // String provides colorized info messages depending on the type of a server
-//        FS server                          non-FS server
+//
+//	FS server                          non-FS server
+//
 // ==============================  ===================================
 // ● <ip>:<port>                   ● <ip>:<port>
-//   Uptime: xxx                     Uptime: xxx
-//   Version: xxx                    Version: xxx
-//   Network: X/Y OK                 Network: X/Y OK
+//
+//	Uptime: xxx                     Uptime: xxx
+//	Version: xxx                    Version: xxx
+//	Network: X/Y OK                 Network: X/Y OK
 //
 // U Used, B Buckets, O Objects    Drives: N/N OK
 //
-//                                   U Used, B Buckets, O Objects
-//                                   N drives online, K drives offline
-//
+//	U Used, B Buckets, O Objects
+//	N drives online, K drives offline
 func (u clusterStruct) String() (msg string) {
 	// Check cluster level "Status" field for error
 	if u.Status == "error" {
@@ -89,33 +147,14 @@ func (u clusterStruct) String() (msg string) {
 	}
 
 	// Initialization
-	var totalOnlineDisksCluster int
-	var totalOfflineDisksCluster int
+	var totalOfflineNodes int
 
 	// Color palette initialization
 	console.SetColor("Info", color.New(color.FgGreen, color.Bold))
 	console.SetColor("InfoFail", color.New(color.FgRed, color.Bold))
 	console.SetColor("InfoWarning", color.New(color.FgYellow, color.Bold))
 
-	// MinIO server type default
-	backendType := madmin.Unknown
-
-	// Set the type of MinIO server ("FS", "Erasure", "Unknown")
-	switch v := u.Info.Backend.(type) {
-	case madmin.FSBackend:
-		backendType = madmin.FS
-	case madmin.ErasureBackend:
-		backendType = madmin.Erasure
-	case map[string]interface{}:
-		vt, ok := v["backendType"]
-		if ok {
-			backendTypeS, _ := vt.(string)
-			switch backendTypeS {
-			case "Erasure":
-				backendType = madmin.Erasure
-			}
-		}
-	}
+	backendType := u.Info.BackendType()
 
 	coloredDot := console.Colorize("Info", dot)
 	if madmin.ItemState(u.Info.Mode) == madmin.ItemInitializing {
@@ -126,36 +165,35 @@ func (u clusterStruct) String() (msg string) {
 		return u.Info.Servers[i].Endpoint < u.Info.Servers[j].Endpoint
 	})
 
-	poolIdx := -1
+	clusterSummary := clusterSummaryInfo(u.Info)
+
 	// Loop through each server and put together info for each one
 	for _, srv := range u.Info.Servers {
-		// Check if MinIO server is offline ("Mode" field),
-		// If offline, error out
-		if srv.State == "offline" {
+		// Check if MinIO server is not online ("Mode" field),
+		if srv.State != string(madmin.ItemOnline) {
+			totalOfflineNodes++
 			// "PrintB" is color blue in console library package
 			msg += fmt.Sprintf("%s  %s\n", console.Colorize("InfoFail", dot), console.Colorize("PrintB", srv.Endpoint))
-			msg += fmt.Sprintf("   Uptime: %s\n", console.Colorize("InfoFail", "offline"))
+			msg += fmt.Sprintf("   Uptime: %s\n", console.Colorize("InfoFail", srv.State))
 
 			if backendType == madmin.Erasure {
 				// Info about drives on a server, only available for non-FS types
-				var OffDisks int
-				var OnDisks int
-				var dispNoOfDisks string
+				var OffDrives int
+				var OnDrives int
+				var dispNoOfDrives string
 				for _, disk := range srv.Disks {
 					switch disk.State {
 					case madmin.DriveStateOk, madmin.DriveStateUnformatted:
-						OnDisks++
+						OnDrives++
 					default:
-						OffDisks++
+						OffDrives++
 					}
 				}
 
-				totalDisksPerServer := OnDisks + OffDisks
-				totalOnlineDisksCluster += OnDisks
-				totalOfflineDisksCluster += OffDisks
+				totalDrivesPerServer := OnDrives + OffDrives
 
-				dispNoOfDisks = strconv.Itoa(OnDisks) + "/" + strconv.Itoa(totalDisksPerServer)
-				msg += fmt.Sprintf("   Drives: %s %s\n", dispNoOfDisks, console.Colorize("InfoFail", "OK "))
+				dispNoOfDrives = strconv.Itoa(OnDrives) + "/" + strconv.Itoa(totalDrivesPerServer)
+				msg += fmt.Sprintf("   Drives: %s %s\n", dispNoOfDrives, console.Colorize("InfoFail", "OK "))
 			}
 
 			msg += "\n"
@@ -196,39 +234,46 @@ func (u clusterStruct) String() (msg string) {
 
 		if backendType == madmin.Erasure {
 			// Info about drives on a server, only available for non-FS types
-			var OffDisks int
-			var OnDisks int
-			var dispNoOfDisks string
+			var OffDrives int
+			var OnDrives int
+			var dispNoOfDrives string
 			for _, disk := range srv.Disks {
-				if poolIdx == -1 {
-					poolIdx = disk.PoolIndex
-				}
 				switch disk.State {
 				case madmin.DriveStateOk, madmin.DriveStateUnformatted:
-					OnDisks++
+					OnDrives++
 				default:
-					OffDisks++
+					OffDrives++
 				}
 			}
 
-			totalDisksPerServer := OnDisks + OffDisks
-			totalOnlineDisksCluster += OnDisks
-			totalOfflineDisksCluster += OffDisks
+			totalDrivesPerServer := OnDrives + OffDrives
 			clr := "Info"
-			if OnDisks != totalDisksPerServer {
+			if OnDrives != totalDrivesPerServer {
 				clr = "InfoWarning"
 			}
-			dispNoOfDisks = strconv.Itoa(OnDisks) + "/" + strconv.Itoa(totalDisksPerServer)
-			msg += fmt.Sprintf("   Drives: %s %s\n", dispNoOfDisks, console.Colorize(clr, "OK "))
+			dispNoOfDrives = strconv.Itoa(OnDrives) + "/" + strconv.Itoa(totalDrivesPerServer)
+			msg += fmt.Sprintf("   Drives: %s %s\n", dispNoOfDrives, console.Colorize(clr, "OK "))
+
+			// Print pools belonging to this server
+			var prettyPools []string
+			for _, pool := range endpointToPools(srv.Endpoint, clusterSummary) {
+				prettyPools = append(prettyPools, strconv.Itoa(pool+1))
+			}
+			msg += fmt.Sprintf("   Pool: %s\n", console.Colorize("Info", fmt.Sprintf("%+v", strings.Join(prettyPools, ", "))))
 		}
 
-		if poolIdx != -1 {
-			msg += fmt.Sprintf("   Pool: %s\n", console.Colorize("Info", humanize.Ordinal(poolIdx+1)))
-		}
 		msg += "\n"
-
-		poolIdx = -1
 	}
+
+	if backendType == madmin.Erasure {
+		msg += "Pools:\n"
+		for pool, summary := range clusterSummary {
+			msg += fmt.Sprintf("   %s, Erasure sets: %d, Drives per erasure set: %d\n",
+				console.Colorize("Info", humanize.Ordinal(pool+1)), summary.setsCount, summary.drivesPerSet)
+		}
+	}
+
+	msg += "\n"
 
 	// Summary on used space, total no of buckets and
 	// total no of objects at the Cluster level
@@ -243,18 +288,14 @@ func (u clusterStruct) String() (msg string) {
 		msg += "\n"
 	}
 	if backendType == madmin.Erasure {
-		// Summary on total no of online and total
-		// number of offline disks at the Cluster level
-		bkInfo, ok := u.Info.Backend.(madmin.ErasureBackend)
-		if ok {
-			msg += fmt.Sprintf("%s online, %s offline\n",
-				english.Plural(bkInfo.OnlineDisks, "drive", ""),
-				english.Plural(bkInfo.OfflineDisks, "drive", ""))
-		} else {
-			msg += fmt.Sprintf("%s online, %s offline\n",
-				english.Plural(totalOnlineDisksCluster, "drive", ""),
-				english.Plural(totalOfflineDisksCluster, "drive", ""))
+		if totalOfflineNodes != 0 {
+			msg += fmt.Sprintf("%s offline, ", english.Plural(totalOfflineNodes, "node", ""))
 		}
+		// Summary on total no of online and total
+		// number of offline drives at the Cluster level
+		msg += fmt.Sprintf("%s online, %s offline\n",
+			english.Plural(u.Info.Backend.OnlineDisks, "drive", ""),
+			english.Plural(u.Info.Backend.OfflineDisks, "drive", ""))
 	}
 
 	// Remove the last new line if any
@@ -274,7 +315,7 @@ func (u clusterStruct) JSON() string {
 // checkAdminInfoSyntax - validate arguments passed by a user
 func checkAdminInfoSyntax(ctx *cli.Context) {
 	if len(ctx.Args()) == 0 || len(ctx.Args()) > 1 {
-		cli.ShowCommandHelpAndExit(ctx, "info", 1) // last argument is exit code
+		showCommandHelpAndExit(ctx, 1) // last argument is exit code
 	}
 }
 

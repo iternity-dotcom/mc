@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -95,17 +95,17 @@ func (s removeBucketMessage) JSON() string {
 }
 
 // Validate command line arguments.
-func checkRbSyntax(ctx context.Context, cliCtx *cli.Context) {
+func checkRbSyntax(cliCtx *cli.Context) {
 	if !cliCtx.Args().Present() {
 		exitCode := 1
-		cli.ShowCommandHelpAndExit(cliCtx, "rb", exitCode)
+		showCommandHelpAndExit(cliCtx, exitCode)
 	}
 	// Set command flags from context.
 	isForce := cliCtx.Bool("force")
 	isDangerous := cliCtx.Bool("dangerous")
 
 	for _, url := range cliCtx.Args() {
-		if isS3NamespaceRemoval(ctx, url) {
+		if isS3NamespaceRemoval(url) {
 			if isForce && isDangerous {
 				continue
 			}
@@ -199,6 +199,15 @@ func deleteBucket(ctx context.Context, url string, isForce bool) *probe.Error {
 			return result.Err.Trace(url)
 		}
 	}
+	// Return early if prefix delete
+	switch c := clnt.(type) {
+	case *S3Client:
+		_, object := c.url2BucketAndObject()
+		if object != "" && isForce {
+			return nil
+		}
+	default:
+	}
 
 	// Remove a bucket without force flag first because force
 	// won't work if a bucket has some locking rules, that's
@@ -215,7 +224,7 @@ func deleteBucket(ctx context.Context, url string, isForce bool) *probe.Error {
 
 // isS3NamespaceRemoval returns true if alias
 // is not qualified by bucket
-func isS3NamespaceRemoval(ctx context.Context, url string) bool {
+func isS3NamespaceRemoval(url string) bool {
 	// clean path for aliases like s3/.
 	// Note: UNC path using / works properly in go 1.9.2 even though it breaks the UNC specification.
 	url = filepath.ToSlash(filepath.Clean(url))
@@ -230,7 +239,7 @@ func mainRemoveBucket(cliCtx *cli.Context) error {
 	defer cancelRemoveBucket()
 
 	// check 'rb' cli arguments.
-	checkRbSyntax(ctx, cliCtx)
+	checkRbSyntax(cliCtx)
 	isForce := cliCtx.Bool("force")
 
 	// Additional command specific theme customization.
@@ -282,7 +291,7 @@ func mainRemoveBucket(cliCtx *cli.Context) error {
 		}
 
 		var bucketsURL []string
-		if isS3NamespaceRemoval(ctx, targetURL) {
+		if isS3NamespaceRemoval(targetURL) {
 			bucketsURL, err = listBucketsURLs(ctx, targetURL)
 			fatalIf(err.Trace(targetURL), "Failed to remove `"+targetURL+"`.")
 		} else {

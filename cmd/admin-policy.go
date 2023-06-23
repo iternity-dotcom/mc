@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -20,10 +20,14 @@ package cmd
 import "github.com/minio/cli"
 
 var adminPolicySubcommands = []cli.Command{
-	adminPolicyAddCmd,
+	adminPolicyCreateCmd,
 	adminPolicyRemoveCmd,
 	adminPolicyListCmd,
 	adminPolicyInfoCmd,
+	adminPolicyAttachCmd,
+	adminPolicyDetachCmd,
+	adminPolicyEntitiesCmd,
+	adminPolicyAddCmd,
 	adminPolicySetCmd,
 	adminPolicyUnsetCmd,
 	adminPolicyUpdateCmd,

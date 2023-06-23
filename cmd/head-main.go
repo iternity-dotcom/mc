@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -23,7 +23,6 @@ import (
 	"compress/gzip"
 	"context"
 	"io"
-	"io/ioutil"
 	"os"
 	"strings"
 	"syscall"
@@ -46,6 +45,10 @@ var headFlags = []cli.Flag{
 	cli.StringFlag{
 		Name:  "version-id, vid",
 		Usage: "select an object version to display",
+	},
+	cli.BoolFlag{
+		Name:  "zip",
+		Usage: "extract from remote zip file (MinIO server source only)",
 	},
 }
 
@@ -89,7 +92,7 @@ EXAMPLES:
 }
 
 // headURL displays contents of a URL to stdout.
-func headURL(sourceURL, sourceVersion string, timeRef time.Time, encKeyDB map[string][]prefixSSEPair, nlines int64) *probe.Error {
+func headURL(sourceURL, sourceVersion string, timeRef time.Time, encKeyDB map[string][]prefixSSEPair, nlines int64, zip bool) *probe.Error {
 	var reader io.ReadCloser
 	switch sourceURL {
 	case "-":
@@ -97,7 +100,7 @@ func headURL(sourceURL, sourceVersion string, timeRef time.Time, encKeyDB map[st
 	default:
 		var err *probe.Error
 		var metadata map[string]string
-		if reader, metadata, err = getSourceStreamMetadataFromURL(context.Background(), sourceURL, sourceVersion, timeRef, encKeyDB); err != nil {
+		if reader, metadata, err = getSourceStreamMetadataFromURL(context.Background(), sourceURL, sourceVersion, timeRef, encKeyDB, zip); err != nil {
 			return err.Trace(sourceURL)
 		}
 		ctype := metadata["Content-Type"]
@@ -110,7 +113,7 @@ func headURL(sourceURL, sourceVersion string, timeRef time.Time, encKeyDB map[st
 			defer reader.Close()
 		} else if strings.Contains(ctype, "bzip") {
 			defer reader.Close()
-			reader = ioutil.NopCloser(bzip2.NewReader(reader))
+			reader = io.NopCloser(bzip2.NewReader(reader))
 		} else {
 			defer reader.Close()
 		}
@@ -199,7 +202,7 @@ func mainHead(ctx *cli.Context) error {
 
 	// Convert arguments to URLs: expand alias, fix format.
 	for _, url := range ctx.Args() {
-		fatalIf(headURL(url, versionID, timeRef, encKeyDB, ctx.Int64("lines")).Trace(url), "Unable to read from `"+url+"`.")
+		fatalIf(headURL(url, versionID, timeRef, encKeyDB, ctx.Int64("lines"), ctx.Bool("zip")).Trace(url), "Unable to read from `"+url+"`.")
 	}
 
 	return nil

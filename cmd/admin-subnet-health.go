@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -23,7 +23,6 @@ import (
 
 	"github.com/minio/cli"
 	"github.com/minio/minio-go/v7/pkg/set"
-	"github.com/minio/pkg/console"
 )
 
 var adminSubnetHealthCmd = cli.Command{
@@ -59,7 +58,7 @@ func mainSubnetHealth(ctx *cli.Context) error {
 		}
 		newCmd = append(newCmd, flgStr)
 	}
-	msg := fmt.Sprintf("Please use '%s'", strings.Join(newCmd, " "))
-	console.Infoln(msg)
+
+	deprecatedError(strings.Join(newCmd, " "))
 	return nil
 }

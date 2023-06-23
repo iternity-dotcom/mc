@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -26,7 +26,8 @@ import (
 
 var adminPolicyListCmd = cli.Command{
 	Name:         "list",
-	Usage:        "list all policies",
+	ShortName:    "ls",
+	Usage:        "list all IAM policies",
 	Action:       mainAdminPolicyList,
 	OnUsageError: onUsageError,
 	Before:       setGlobalsFromContext,
@@ -49,7 +50,7 @@ EXAMPLES:
 // checkAdminPolicyListSyntax - validate all the passed arguments
 func checkAdminPolicyListSyntax(ctx *cli.Context) {
 	if len(ctx.Args()) != 1 {
-		cli.ShowCommandHelpAndExit(ctx, "list", 1) // last argument is exit code
+		showCommandHelpAndExit(ctx, 1) // last argument is exit code
 	}
 }
 
@@ -57,8 +58,7 @@ func checkAdminPolicyListSyntax(ctx *cli.Context) {
 func mainAdminPolicyList(ctx *cli.Context) error {
 	checkAdminPolicyListSyntax(ctx)
 
-	console.SetColor("PolicyMessage", color.New(color.FgGreen))
-	console.SetColor("Policy", color.New(color.FgBlue))
+	console.SetColor("PolicyName", color.New(color.FgBlue))
 
 	// Get the alias parameter from cli
 	args := ctx.Args()
@@ -73,7 +73,7 @@ func mainAdminPolicyList(ctx *cli.Context) error {
 
 	for k := range policies {
 		printMsg(userPolicyMessage{
-			op:     "list",
+			op:     ctx.Command.Name,
 			Policy: k,
 		})
 	}

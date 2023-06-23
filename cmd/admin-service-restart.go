@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -25,14 +25,14 @@ import (
 	"github.com/fatih/color"
 	"github.com/minio/cli"
 	json "github.com/minio/colorjson"
-	"github.com/minio/madmin-go"
+	"github.com/minio/madmin-go/v3"
 	"github.com/minio/mc/pkg/probe"
 	"github.com/minio/pkg/console"
 )
 
 var adminServiceRestartCmd = cli.Command{
 	Name:         "restart",
-	Usage:        "restart all MinIO servers",
+	Usage:        "restart a MinIO cluster",
 	Action:       mainAdminServiceRestart,
 	OnUsageError: onUsageError,
 	Before:       setGlobalsFromContext,
@@ -98,13 +98,16 @@ func (s serviceRestartMessage) JSON() string {
 // checkAdminServiceRestartSyntax - validate all the passed arguments
 func checkAdminServiceRestartSyntax(ctx *cli.Context) {
 	if len(ctx.Args()) != 1 {
-		cli.ShowCommandHelpAndExit(ctx, "restart", 1) // last argument is exit code
+		showCommandHelpAndExit(ctx, 1) // last argument is exit code
 	}
 }
 
 func mainAdminServiceRestart(ctx *cli.Context) error {
 	// Validate serivce restart syntax.
 	checkAdminServiceRestartSyntax(ctx)
+
+	ctxt, cancel := context.WithCancel(globalContext)
+	defer cancel()
 
 	// Set color.
 	console.SetColor("ServiceOffline", color.New(color.FgRed, color.Bold))
@@ -120,10 +123,15 @@ func mainAdminServiceRestart(ctx *cli.Context) error {
 	fatalIf(err, "Unable to initialize admin connection.")
 
 	// Restart the specified MinIO server
-	fatalIf(probe.NewError(client.ServiceRestart(globalContext)), "Unable to restart the server.")
+	fatalIf(probe.NewError(client.ServiceRestart(ctxt)), "Unable to restart the server.")
 
 	// Success..
 	printMsg(serviceRestartCommand{Status: "success", ServerURL: aliasedURL})
+
+	// Start pinging the service until it is ready
+
+	anonClient, err := newAnonymousClient(aliasedURL)
+	fatalIf(err.Trace(aliasedURL), "Could not ping `"+aliasedURL+"`.")
 
 	coloring := color.New(color.FgRed)
 	mark := "..."
@@ -144,30 +152,30 @@ func mainAdminServiceRestart(ctx *cli.Context) error {
 	t := time.Now()
 	for {
 		select {
-		case <-globalContext.Done():
-			return globalContext.Err()
+		case <-ctxt.Done():
+			return ctxt.Err()
 		case <-timer.C:
-			timer.Reset(time.Second)
-
-			ctx, cancel := context.WithTimeout(globalContext, 3*time.Second)
-			// Fetch the service status of the specified MinIO server
-			info, e := client.ServerInfo(ctx)
-			cancel()
+			healthCtx, healthCancel := context.WithTimeout(ctxt, 3*time.Second)
+			// Fetch the health status of the specified MinIO server
+			healthResult, healthErr := anonClient.Healthy(healthCtx, madmin.HealthOpts{})
+			healthCancel()
 			switch {
-			case e == nil && info.Mode == string(madmin.ItemOnline):
+			case healthErr == nil && healthResult.Healthy:
 				printMsg(serviceRestartMessage{
 					Status:    "success",
 					ServerURL: aliasedURL,
 					TimeTaken: time.Since(t),
 				})
 				return nil
-			case err == nil && info.Mode == string(madmin.ItemInitializing):
+			case healthErr == nil && !healthResult.Healthy:
 				coloring = color.New(color.FgYellow)
 				mark = "!"
 				fallthrough
 			default:
 				printProgress()
 			}
+
+			timer.Reset(time.Second)
 		}
 	}
 }

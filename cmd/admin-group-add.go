@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -24,7 +24,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/minio/cli"
 	json "github.com/minio/colorjson"
-	"github.com/minio/madmin-go"
+	"github.com/minio/madmin-go/v3"
 	"github.com/minio/mc/pkg/probe"
 	"github.com/minio/pkg/console"
 )
@@ -48,13 +48,17 @@ FLAGS:
 EXAMPLES:
   1. Add users 'fivecent' and 'tencent' to the group 'allcents':
      {{.Prompt}} {{.HelpName}} myminio allcents fivecent tencent
+
+  2. Add user "james" to group "staff", then add the "readwrite" policy to the group "staff".
+     {{.Prompt}} {{.HelpName}} myminio staff james
+     {{.Prompt}} mc admin policy attach myminio readwrite --group staff
 `,
 }
 
 // checkAdminGroupAddSyntax - validate all the passed arguments
 func checkAdminGroupAddSyntax(ctx *cli.Context) {
 	if len(ctx.Args()) < 3 {
-		cli.ShowCommandHelpAndExit(ctx, "add", 1) // last argument is exit code
+		showCommandHelpAndExit(ctx, 1) // last argument is exit code
 	}
 }
 
@@ -82,8 +86,8 @@ func (u groupMessage) String() string {
 	case "enable":
 		return console.Colorize("GroupMessage", "Enabled group `"+u.GroupName+"` successfully.")
 	case "add":
-		membersStr := fmt.Sprintf("{%s}", strings.Join(u.Members, ","))
-		return console.Colorize("GroupMessage", "Added members "+membersStr+" to group "+u.GroupName+" successfully.")
+		membersStr := fmt.Sprintf("`%s`", strings.Join(u.Members, ","))
+		return console.Colorize("GroupMessage", "Added members "+membersStr+" to group `"+u.GroupName+"` successfully.")
 	case "remove":
 		if len(u.Members) > 0 {
 			membersStr := fmt.Sprintf("{%s}", strings.Join(u.Members, ","))
@@ -136,7 +140,7 @@ func mainAdminGroupAdd(ctx *cli.Context) error {
 	fatalIf(probe.NewError(client.UpdateGroupMembers(globalContext, gAddRemove)).Trace(args...), "Unable to add new group")
 
 	printMsg(groupMessage{
-		op:        "add",
+		op:        ctx.Command.Name,
 		GroupName: args.Get(1),
 		Members:   members,
 	})

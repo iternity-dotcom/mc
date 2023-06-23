@@ -23,7 +23,7 @@ import (
 	humanize "github.com/dustin/go-humanize"
 	"github.com/fatih/color"
 	"github.com/minio/cli"
-	"github.com/minio/madmin-go"
+	"github.com/minio/madmin-go/v3"
 	"github.com/minio/mc/pkg/probe"
 	"github.com/minio/pkg/console"
 )
@@ -48,7 +48,7 @@ EXAMPLES:
   1. Cancel an ongoing decommissioning of a pool.
      {{.Prompt}} {{.HelpName}} myminio/ http://server{5...8}/disk{1...4}
 
-  2. List all ongoing decommissioning of pools.
+  2. Cancel all ongoing decommissioning of pools.
      {{.Prompt}} {{.HelpName}} myminio/
 `,
 }
@@ -56,7 +56,7 @@ EXAMPLES:
 // checkAdminDecommissionCancelSyntax - validate all the passed arguments
 func checkAdminDecommissionCancelSyntax(ctx *cli.Context) {
 	if len(ctx.Args()) > 2 || len(ctx.Args()) == 0 {
-		cli.ShowCommandHelpAndExit(ctx, ctx.Command.Name, 1) // last argument is exit code
+		showCommandHelpAndExit(ctx, 1) // last argument is exit code
 	}
 }
 

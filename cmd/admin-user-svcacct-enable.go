@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -20,7 +20,7 @@ package cmd
 import (
 	"github.com/fatih/color"
 	"github.com/minio/cli"
-	"github.com/minio/madmin-go"
+	"github.com/minio/madmin-go/v3"
 	"github.com/minio/mc/pkg/probe"
 	"github.com/minio/pkg/console"
 )
@@ -50,7 +50,7 @@ EXAMPLES:
 // checkAdminUserSvcAcctEnableSyntax - validate all the passed arguments
 func checkAdminUserSvcAcctEnableSyntax(ctx *cli.Context) {
 	if len(ctx.Args()) != 2 {
-		cli.ShowCommandHelpAndExit(ctx, "enable", 1)
+		showCommandHelpAndExit(ctx, 1)
 	}
 }
 
@@ -58,7 +58,7 @@ func checkAdminUserSvcAcctEnableSyntax(ctx *cli.Context) {
 func mainAdminUserSvcAcctEnable(ctx *cli.Context) error {
 	checkAdminUserSvcAcctEnableSyntax(ctx)
 
-	console.SetColor("SVCMessage", color.New(color.FgGreen))
+	console.SetColor("AccMessage", color.New(color.FgGreen))
 
 	// Get the alias parameter from cli
 	args := ctx.Args()
@@ -76,8 +76,8 @@ func mainAdminUserSvcAcctEnable(ctx *cli.Context) error {
 	e := client.UpdateServiceAccount(globalContext, svcAccount, opts)
 	fatalIf(probe.NewError(e).Trace(args...), "Unable to enable the specified service account")
 
-	printMsg(svcAcctMessage{
-		op:        "enable",
+	printMsg(acctMessage{
+		op:        svcAccOpEnable,
 		AccessKey: svcAccount,
 	})
 

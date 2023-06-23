@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -131,15 +131,14 @@ func parseTreeSyntax(ctx context.Context, cliCtx *cli.Context) (args []string, d
 	}
 
 	for _, url := range args {
-		if _, _, err := url2Stat(ctx, url, "", false, nil, timeRef, false); err != nil && !isURLPrefixExists(url, false) {
-			fatalIf(err.Trace(url), "Unable to tree `"+url+"`.")
-		}
+		_, _, err := url2Stat(ctx, url, "", false, nil, timeRef, false)
+		fatalIf(err.Trace(url), "Unable to tree `"+url+"`.")
 	}
 	return
 }
 
 // doTree - list all entities inside a folder in a tree format.
-func doTree(ctx context.Context, url string, timeRef time.Time, level int, leaf bool, branchString string, depth int, includeFiles bool) error {
+func doTree(ctx context.Context, url string, timeRef time.Time, level int, branchString string, depth int, includeFiles bool) error {
 	targetAlias, targetURL, _ := mustExpandAlias(url)
 	if !strings.HasSuffix(targetURL, "/") {
 		targetURL += "/"
@@ -218,7 +217,7 @@ func doTree(ctx context.Context, url string, timeRef time.Time, level int, leaf 
 			}
 
 			if depth == -1 || level <= depth {
-				if err := doTree(ctx, url, timeRef, level+1, end, currbranchString, depth, includeFiles); err != nil {
+				if err := doTree(ctx, url, timeRef, level+1, currbranchString, depth, includeFiles); err != nil {
 					return err
 				}
 			}
@@ -274,7 +273,7 @@ func mainTree(cliCtx *cli.Context) error {
 	var cErr error
 	for _, targetURL := range args {
 		if !globalJSON {
-			if e := doTree(ctx, targetURL, timeRef, 1, false, "", depth, includeFiles); e != nil {
+			if e := doTree(ctx, targetURL, timeRef, 1, "", depth, includeFiles); e != nil {
 				cErr = e
 			}
 		} else {

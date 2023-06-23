@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -50,6 +50,7 @@ var eventRemoveFlags = []cli.Flag{
 
 var eventRemoveCmd = cli.Command{
 	Name:         "remove",
+	ShortName:    "rm",
 	Usage:        "remove a bucket notification; '--force' removes all bucket notifications",
 	Action:       mainEventRemove,
 	OnUsageError: onUsageError,
@@ -76,7 +77,7 @@ EXAMPLES:
 // checkEventRemoveSyntax - validate all the passed arguments
 func checkEventRemoveSyntax(ctx *cli.Context) {
 	if len(ctx.Args()) == 0 || len(ctx.Args()) > 2 {
-		cli.ShowCommandHelpAndExit(ctx, "remove", 1) // last argument is exit code
+		showCommandHelpAndExit(ctx, 1) // last argument is exit code
 	}
 	if len(ctx.Args()) == 1 && !ctx.Bool("force") {
 		fatalIf(probe.NewError(errors.New("")), "--force flag needs to be passed to remove all bucket notifications.")

@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -93,7 +93,7 @@ var configHostRemoveCmd = cli.Command{
 	ShortName: "rm",
 	Usage:     "remove a host from configuration file",
 	Action: func(cli *cli.Context) error {
-		return mainAliasRemove(cli, true)
+		return mainAliasRemove(cli)
 	},
 	Before:          setGlobalsFromContext,
 	Flags:           globalFlags,

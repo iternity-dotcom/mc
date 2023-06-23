@@ -70,7 +70,7 @@ func checkAliasImportSyntax(ctx *cli.Context) {
 	argsNr := len(args)
 
 	if argsNr == 0 {
-		cli.ShowCommandHelpAndExit(ctx, ctx.Command.Name, 1)
+		showCommandHelpAndExit(ctx, 1)
 	}
 	if argsNr > 2 {
 		fatalIf(errInvalidArgument().Trace(ctx.Args().Tail()...),
@@ -95,8 +95,8 @@ func checkCredentialsSyntax(credentials aliasConfigV10) {
 	}
 
 	if !isValidSecretKey(credentials.SecretKey) {
-		fatalIf(errInvalidArgument().Trace(credentials.SecretKey),
-			"Invalid secret key `"+credentials.SecretKey+"`.")
+		fatalIf(errInvalidArgument().Trace(),
+			"Invalid secret key.")
 	}
 
 	if credentials.API != "" && !isValidAPI(credentials.API) { // Empty value set to default "S3v4".

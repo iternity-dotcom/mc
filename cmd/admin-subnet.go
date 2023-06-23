@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -19,7 +19,6 @@ package cmd
 
 import (
 	"github.com/minio/cli"
-	"github.com/minio/pkg/console"
 )
 
 var subnetHealthSubcommands = []cli.Command{
@@ -38,8 +37,8 @@ var adminSubnetCmd = cli.Command{
 }
 
 // mainAdminSubnet is the handle for "mc admin subnet" command.
-func mainAdminSubnet(ctx *cli.Context) error {
-	console.Infoln("Please use 'mc support'")
+func mainAdminSubnet(_ *cli.Context) error {
+	deprecatedError("mc support")
 	return nil
 	// Sub-commands like "health", "register" have their own main.
 }

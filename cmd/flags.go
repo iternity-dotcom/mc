@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -18,6 +18,8 @@
 package cmd
 
 import (
+	"time"
+
 	"github.com/minio/cli"
 )
 
@@ -47,6 +49,26 @@ var globalFlags = []cli.Flag{
 	cli.BoolFlag{
 		Name:  "insecure",
 		Usage: "disable SSL certificate verification",
+	},
+	cli.StringFlag{
+		Name:  "limit-upload",
+		Usage: "limits uploads to a maximum rate in KiB/s, MiB/s, GiB/s. (default: unlimited)",
+	},
+	cli.StringFlag{
+		Name:  "limit-download",
+		Usage: "limits downloads to a maximum rate in KiB/s, MiB/s, GiB/s. (default: unlimited)",
+	},
+	cli.DurationFlag{
+		Name:   "conn-read-deadline",
+		Usage:  "custom connection READ deadline",
+		Hidden: true,
+		Value:  10 * time.Minute,
+	},
+	cli.DurationFlag{
+		Name:   "conn-write-deadline",
+		Usage:  "custom connection WRITE deadline",
+		Hidden: true,
+		Value:  10 * time.Minute,
 	},
 }
 

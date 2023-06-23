@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -24,6 +24,7 @@ import (
 	"hash/fnv"
 	"net/http"
 	"path"
+	"sort"
 	"strings"
 	"time"
 
@@ -31,7 +32,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/minio/cli"
 	json "github.com/minio/colorjson"
-	"github.com/minio/madmin-go"
+	"github.com/minio/madmin-go/v3"
 	"github.com/minio/mc/pkg/probe"
 	"github.com/minio/pkg/console"
 )
@@ -47,13 +48,8 @@ var adminTraceFlags = []cli.Flag{
 	},
 	cli.StringSliceFlag{
 		Name:  "call",
-		Usage: "trace only matching Call types (values: `s3`, `internal`, `storage`, `os`)",
+		Usage: "trace only matching call types. See CALL TYPES below for list. (default: s3)",
 	},
-	cli.StringFlag{
-		Name:  "response-threshold",
-		Usage: "trace calls only with response duration greater than this threshold (e.g. `5ms`)",
-	},
-
 	cli.IntSliceFlag{
 		Name:  "status-code",
 		Usage: "trace only matching status code",
@@ -70,10 +66,95 @@ var adminTraceFlags = []cli.Flag{
 		Name:  "path",
 		Usage: "trace only matching path",
 	},
+	cli.StringSliceFlag{
+		Name:  "node",
+		Usage: "trace only matching servers",
+	},
+	cli.StringSliceFlag{
+		Name:  "request-header",
+		Usage: "trace only matching request headers",
+	},
 	cli.BoolFlag{
 		Name:  "errors, e",
 		Usage: "trace only failed requests",
 	},
+	cli.BoolFlag{
+		Name:  "filter-request",
+		Usage: "trace calls only with request bytes greater than this threshold, use with filter-size",
+	},
+	cli.BoolFlag{
+		Name:  "filter-response",
+		Usage: "trace calls only with response bytes greater than this threshold, use with filter-size",
+	},
+	cli.DurationFlag{
+		Name:  "response-duration",
+		Usage: "trace calls only with response duration greater than this threshold (e.g. `5ms`)",
+	},
+	cli.StringFlag{
+		Name:  "filter-size",
+		Usage: "filter size, use with filter (see UNITS)",
+	},
+}
+
+// traceCallTypes contains all call types and flags to apply when selected.
+var traceCallTypes = map[string]func(o *madmin.ServiceTraceOpts) (help string){
+	"storage":   func(o *madmin.ServiceTraceOpts) string { o.Storage = true; return "Trace Storage calls" },
+	"internal":  func(o *madmin.ServiceTraceOpts) string { o.Internal = true; return "Trace Internal RPC calls" },
+	"s3":        func(o *madmin.ServiceTraceOpts) string { o.S3 = true; return "Trace S3 API calls" },
+	"os":        func(o *madmin.ServiceTraceOpts) string { o.OS = true; return "Trace Operating System calls" },
+	"scanner":   func(o *madmin.ServiceTraceOpts) string { o.Scanner = true; return "Trace Scanner calls" },
+	"bootstrap": func(o *madmin.ServiceTraceOpts) string { o.Bootstrap = true; return "Trace Bootstrap operations" },
+	"ilm":       func(o *madmin.ServiceTraceOpts) string { o.ILM = true; return "Trace ILM operations" },
+	"ftp":       func(o *madmin.ServiceTraceOpts) string { o.FTP = true; return "Trace FTP operations" },
+
+	"healing": func(o *madmin.ServiceTraceOpts) string {
+		o.Healing = true
+		return "Trace Healing operations (alias: heal)"
+	},
+	"batch-replication": func(o *madmin.ServiceTraceOpts) string {
+		o.BatchReplication = true
+		return "Trace Batch Replication (alias: brep)"
+	},
+	"batch-keyrotation": func(o *madmin.ServiceTraceOpts) string {
+		o.BatchKeyRotation = true
+		return "Trace Batch KeyRotation (alias: brot)"
+	},
+	"decommission": func(o *madmin.ServiceTraceOpts) string {
+		o.Decommission = true
+		return "Trace Decommission operations (alias: decom)"
+	},
+	"rebalance": func(o *madmin.ServiceTraceOpts) string {
+		o.Rebalance = true
+		return "Trace Server Pool Rebalancing operations"
+	},
+	"replication-resync": func(o *madmin.ServiceTraceOpts) string {
+		o.ReplicationResync = true
+		return "Trace Replication Resync operations (alias: resync)"
+	},
+}
+
+// traceCallTypes contains aliases (short versions) of
+var traceCallTypeAliases = map[string]func(o *madmin.ServiceTraceOpts) string{
+	"heal":   traceCallTypes["healing"],
+	"decom":  traceCallTypes["decommission"],
+	"resync": traceCallTypes["replication-resync"],
+	"brep":   traceCallTypes["batch-replication"],
+	"brot":   traceCallTypes["batch-keyrotation"],
+}
+
+func traceCallsHelp() string {
+	var help []string
+	o := madmin.ServiceTraceOpts{}
+	const padkeyLen = 19
+	for k, fn := range traceCallTypes {
+		pad := ""
+		if len(k) < padkeyLen {
+			pad = strings.Repeat(" ", padkeyLen-len(k))
+		}
+		help = append(help, fmt.Sprintf("  %s: %s%s", k, pad, fn(&o)))
+	}
+	sort.Strings(help)
+	return strings.Join(help, "\n")
 }
 
 var adminTraceCmd = cli.Command{
@@ -93,6 +174,17 @@ USAGE:
 FLAGS:
   {{range .VisibleFlags}}{{.}}
   {{end}}
+
+CALL TYPES:
+` + traceCallsHelp() + `
+
+UNITS
+  --filter-size flags use with --filter-response or --filter-request accept human-readable case-insensitive number
+  suffixes such as "k", "m", "g" and "t" referring to the metric units KB,
+  MB, GB and TB respectively. Adding an "i" to these prefixes, uses the IEC
+  units, so that "gi" refers to "gibibyte" or "GiB". A "b" at the end is
+  also accepted. Without suffixes the unit is bytes.
+
 EXAMPLES:
   1. Show verbose console trace for MinIO server
      {{.Prompt}} {{.HelpName}} -v -a myminio
@@ -108,6 +200,15 @@ EXAMPLES:
 
   5. Show console trace for requests with '404' and '503' status code
     {{.Prompt}} {{.HelpName}} --status-code 404 --status-code 503 myminio
+  
+  6. Show trace only for requests bytes greater than 1MB
+    {{.Prompt}} {{.HelpName}} --filter-request --filter-size 1MB myminio
+
+  7. Show trace only for response bytes greater than 1MB
+    {{.Prompt}} {{.HelpName}} --filter-response --filter-size 1MB myminio
+  
+  8. Show trace only for requests operations duration greater than 5ms
+     {{.Prompt}} {{.HelpName}} --response-duration 5ms myminio
 `,
 }
 
@@ -117,7 +218,16 @@ var colors = []color.Attribute{color.FgCyan, color.FgWhite, color.FgYellow, colo
 
 func checkAdminTraceSyntax(ctx *cli.Context) {
 	if len(ctx.Args()) != 1 {
-		cli.ShowCommandHelpAndExit(ctx, "trace", 1) // last argument is exit code
+		showCommandHelpAndExit(ctx, 1) // last argument is exit code
+	}
+	filterFlag := ctx.Bool("filter-request") || ctx.Bool("filter-response")
+	if filterFlag && ctx.String("filter-size") == "" {
+		// filter must use with filter-size flags
+		showCommandHelpAndExit(ctx, 1)
+	}
+
+	if ctx.Bool("all") && len(ctx.StringSlice("call")) > 0 {
+		fatalIf(errDummy().Trace(), "You cannot specify both --all and --call flags at the same time.")
 	}
 }
 
@@ -129,22 +239,28 @@ func printTrace(verbose bool, traceInfo madmin.ServiceTraceInfo) {
 	}
 }
 
-func matchTrace(ctx *cli.Context, traceInfo madmin.ServiceTraceInfo) bool {
-	statusCodes := ctx.IntSlice("status-code")
-	methods := ctx.StringSlice("method")
-	funcNames := ctx.StringSlice("funcname")
-	apiPaths := ctx.StringSlice("path")
+type matchString struct {
+	val     string
+	reverse bool
+}
 
-	if len(statusCodes) == 0 && len(methods) == 0 && len(funcNames) == 0 && len(apiPaths) == 0 {
-		// no specific filtering found trace all the requests
-		return true
-	}
+type matchOpts struct {
+	statusCodes  []int
+	methods      []string
+	funcNames    []string
+	apiPaths     []string
+	nodes        []string
+	reqHeaders   []matchString
+	requestSize  uint64
+	responseSize uint64
+}
 
+func matchTrace(opts matchOpts, traceInfo madmin.ServiceTraceInfo) bool {
 	// Filter request path if passed by the user
-	if len(apiPaths) > 0 {
+	if len(opts.apiPaths) > 0 {
 		matched := false
-		for _, apiPath := range apiPaths {
-			if pathMatch(path.Join("/", apiPath), traceInfo.Trace.ReqInfo.Path) {
+		for _, apiPath := range opts.apiPaths {
+			if pathMatch(path.Join("/", apiPath), traceInfo.Trace.Path) {
 				matched = true
 				break
 			}
@@ -155,10 +271,10 @@ func matchTrace(ctx *cli.Context, traceInfo madmin.ServiceTraceInfo) bool {
 	}
 
 	// Filter response status codes if passed by the user
-	if len(statusCodes) > 0 {
+	if len(opts.statusCodes) > 0 {
 		matched := false
-		for _, code := range statusCodes {
-			if traceInfo.Trace.RespInfo.StatusCode == code {
+		for _, code := range opts.statusCodes {
+			if traceInfo.Trace.HTTP != nil && traceInfo.Trace.HTTP.RespInfo.StatusCode == code {
 				matched = true
 				break
 			}
@@ -170,10 +286,10 @@ func matchTrace(ctx *cli.Context, traceInfo madmin.ServiceTraceInfo) bool {
 	}
 
 	// Filter request method if passed by the user
-	if len(methods) > 0 {
+	if len(opts.methods) > 0 {
 		matched := false
-		for _, method := range methods {
-			if traceInfo.Trace.ReqInfo.Method == method {
+		for _, method := range opts.methods {
+			if traceInfo.Trace.HTTP != nil && traceInfo.Trace.HTTP.ReqInfo.Method == method {
 				matched = true
 				break
 			}
@@ -184,10 +300,10 @@ func matchTrace(ctx *cli.Context, traceInfo madmin.ServiceTraceInfo) bool {
 
 	}
 
-	if len(funcNames) > 0 {
+	if len(opts.funcNames) > 0 {
 		matched := false
 		// Filter request function handler names if passed by the user.
-		for _, funcName := range funcNames {
+		for _, funcName := range opts.funcNames {
 			if nameMatch(funcName, traceInfo.Trace.FuncName) {
 				matched = true
 				break
@@ -198,32 +314,94 @@ func matchTrace(ctx *cli.Context, traceInfo madmin.ServiceTraceInfo) bool {
 		}
 	}
 
+	if len(opts.nodes) > 0 {
+		matched := false
+		// Filter request by node if passed by the user.
+		for _, node := range opts.nodes {
+			if nameMatch(node, traceInfo.Trace.NodeName) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+
+	if len(opts.reqHeaders) > 0 && traceInfo.Trace.HTTP != nil {
+		matched := false
+		for _, hdr := range opts.reqHeaders {
+			headerFound := false
+			for traceHdr, traceVals := range traceInfo.Trace.HTTP.ReqInfo.Headers {
+				for _, traceVal := range traceVals {
+					if headerMatch(hdr.val, traceHdr+": "+traceVal) {
+						headerFound = true
+						goto exitFindingHeader
+					}
+				}
+			}
+		exitFindingHeader:
+			if !hdr.reverse && headerFound || hdr.reverse && !headerFound {
+				matched = true
+				goto exitMatchingHeader
+			}
+		}
+	exitMatchingHeader:
+		if !matched {
+			return false
+		}
+	}
+
+	if opts.requestSize > 0 && traceInfo.Trace.HTTP.CallStats.InputBytes < int(opts.requestSize) {
+		return false
+	}
+
+	if opts.responseSize > 0 && traceInfo.Trace.HTTP.CallStats.OutputBytes < int(opts.responseSize) {
+		return false
+	}
+
 	return true
 }
 
-// Calculate tracing options for command line flags
-func tracingOpts(ctx *cli.Context) (opts madmin.ServiceTraceOpts, e error) {
-	if t := ctx.String("response-threshold"); t != "" {
-		d, e := time.ParseDuration(t)
-		if e != nil {
-			return opts, fmt.Errorf("Unable to parse threshold argument: %w", e)
-		}
-		opts.Threshold = d
+func matchingOpts(ctx *cli.Context) (opts matchOpts) {
+	opts.statusCodes = ctx.IntSlice("status-code")
+	opts.methods = ctx.StringSlice("method")
+	opts.funcNames = ctx.StringSlice("funcname")
+	opts.apiPaths = ctx.StringSlice("path")
+	opts.nodes = ctx.StringSlice("node")
+	for _, s := range ctx.StringSlice("request-header") {
+		ms := matchString{}
+		ms.reverse = strings.HasPrefix(s, "!")
+		ms.val = strings.TrimPrefix(s, "!")
+		opts.reqHeaders = append(opts.reqHeaders, ms)
+	}
+	var e error
+	var requestSize, responseSize uint64
+	if ctx.Bool("filter-request") && ctx.String("filter-size") != "" {
+		requestSize, e = humanize.ParseBytes(ctx.String("filter-size"))
+		fatalIf(probe.NewError(e).Trace(ctx.String("filter-size")), "Unable to parse input bytes.")
 	}
 
+	if ctx.Bool("filter-response") && ctx.String("filter-size") != "" {
+		responseSize, e = humanize.ParseBytes(ctx.String("filter-size"))
+		fatalIf(probe.NewError(e).Trace(ctx.String("filter-size")), "Unable to parse input bytes.")
+	}
+	opts.requestSize = requestSize
+	opts.responseSize = responseSize
+	return
+}
+
+// Calculate tracing options for command line flags
+func tracingOpts(ctx *cli.Context, apis []string) (opts madmin.ServiceTraceOpts, e error) {
+	opts.Threshold = ctx.Duration("response-duration")
 	opts.OnlyErrors = ctx.Bool("errors")
 
 	if ctx.Bool("all") {
-		opts.All = true // Deprecated
-
-		opts.S3 = true
-		opts.Internal = true
-		opts.Storage = true
-		opts.OS = true
-		return
+		for _, fn := range traceCallTypes {
+			fn(&opts)
+		}
 	}
 
-	apis := ctx.StringSlice("call")
 	if len(apis) == 0 {
 		// If api flag is not specified, then we will
 		// trace only S3 requests by default.
@@ -232,18 +410,15 @@ func tracingOpts(ctx *cli.Context) (opts madmin.ServiceTraceOpts, e error) {
 	}
 
 	for _, api := range apis {
-		switch api {
-		case "storage":
-			opts.Storage = true
-		case "internal":
-			opts.Internal = true
-		case "s3":
-			opts.S3 = true
-		case "os":
-			opts.OS = true
+		fn, ok := traceCallTypes[api]
+		if !ok {
+			fn, ok = traceCallTypeAliases[api]
 		}
+		if !ok {
+			return madmin.ServiceTraceOpts{}, fmt.Errorf("unknown call name: `%s`", api)
+		}
+		fn(&opts)
 	}
-
 	return
 }
 
@@ -269,6 +444,7 @@ func mainAdminTrace(ctx *cli.Context) error {
 	console.SetColor("ErrStatus", color.New(color.Bold, color.FgRed))
 
 	console.SetColor("Response", color.New(color.FgGreen))
+	console.SetColor("Extra", color.New(color.FgBlue))
 	console.SetColor("Body", color.New(color.FgYellow))
 	for _, c := range colors {
 		console.SetColor(fmt.Sprintf("Node%d", c), color.New(c))
@@ -283,8 +459,10 @@ func mainAdminTrace(ctx *cli.Context) error {
 	ctxt, cancel := context.WithCancel(globalContext)
 	defer cancel()
 
-	opts, e := tracingOpts(ctx)
+	opts, e := tracingOpts(ctx, ctx.StringSlice("call"))
 	fatalIf(probe.NewError(e), "Unable to start tracing")
+
+	mopts := matchingOpts(ctx)
 
 	// Start listening on all trace activity.
 	traceCh := client.ServiceTrace(ctxt, opts)
@@ -292,30 +470,31 @@ func mainAdminTrace(ctx *cli.Context) error {
 		if traceInfo.Err != nil {
 			fatalIf(probe.NewError(traceInfo.Err), "Unable to listen to http trace")
 		}
-		if matchTrace(ctx, traceInfo) {
+		if matchTrace(mopts, traceInfo) {
 			printTrace(verbose, traceInfo)
 		}
 	}
+
 	return nil
 }
 
 // Short trace record
 type shortTraceMsg struct {
-	Status     string    `json:"status"`
-	Host       string    `json:"host"`
-	Time       time.Time `json:"time"`
-	Client     string    `json:"client"`
-	CallStats  callStats `json:"callStats"`
-	FuncName   string    `json:"api"`
-	Path       string    `json:"path"`
-	Query      string    `json:"query"`
-	StatusCode int       `json:"statusCode"`
-	StatusMsg  string    `json:"statusMsg"`
-
-	StorageStats storageStats     `json:"storageStats"`
-	OSStats      osStats          `json:"osStats"`
-	trcType      madmin.TraceType `json:"-"`
-	Type         string           `json:"type"`
+	Status     string            `json:"status"`
+	Host       string            `json:"host"`
+	Time       time.Time         `json:"time"`
+	Client     string            `json:"client"`
+	CallStats  *callStats        `json:"callStats,omitempty"`
+	Duration   time.Duration     `json:"duration"`
+	FuncName   string            `json:"api"`
+	Path       string            `json:"path"`
+	Query      string            `json:"query"`
+	StatusCode int               `json:"statusCode"`
+	StatusMsg  string            `json:"statusMsg"`
+	Type       string            `json:"type"`
+	Error      string            `json:"error"`
+	Extra      map[string]string `json:"extra"`
+	trcType    madmin.TraceType
 }
 
 type traceMessage struct {
@@ -347,41 +526,23 @@ type callStats struct {
 	Ttfb     time.Duration `json:"timeToFirstByte"`
 }
 
-type osStats struct {
-	Duration time.Duration `json:"duration"`
-	Path     string        `json:"path"`
-}
-
-type storageStats struct {
-	Duration time.Duration `json:"duration"`
-	Path     string        `json:"path"`
-}
-
 type verboseTrace struct {
-	trcType madmin.TraceType `json:"-"`
-	Type    string           `json:"type"`
+	Type string `json:"type"`
 
-	NodeName string    `json:"host"`
-	FuncName string    `json:"api"`
-	Time     time.Time `json:"time"`
+	NodeName     string                 `json:"host"`
+	FuncName     string                 `json:"api"`
+	Time         time.Time              `json:"time"`
+	Duration     time.Duration          `json:"duration"`
+	Path         string                 `json:"path"`
+	Error        string                 `json:"error,omitempty"`
+	Message      string                 `json:"message,omitempty"`
+	RequestInfo  *requestInfo           `json:"request,omitempty"`
+	ResponseInfo *responseInfo          `json:"response,omitempty"`
+	CallStats    *callStats             `json:"callStats,omitempty"`
+	HealResult   *madmin.HealResultItem `json:"healResult,omitempty"`
+	Extra        map[string]string      `json:"extra,omitempty"`
 
-	RequestInfo  requestInfo  `json:"request"`
-	ResponseInfo responseInfo `json:"response"`
-	CallStats    callStats    `json:"callStats"`
-
-	StorageStats storageStats `json:"storageStats"`
-	OSStats      osStats      `json:"osStats"`
-}
-
-func toTypeStr(t madmin.TraceType) string {
-	switch t {
-	case madmin.TraceStorage:
-		return "STORAGE"
-	case madmin.TraceOS:
-		return "OS"
-	default:
-		return "S3"
-	}
+	trcType madmin.TraceType
 }
 
 // return a struct with minimal trace info.
@@ -390,32 +551,26 @@ func shortTrace(ti madmin.ServiceTraceInfo) shortTraceMsg {
 	t := ti.Trace
 
 	s.trcType = t.TraceType
-	s.Type = toTypeStr(t.TraceType)
+	s.Type = t.TraceType.String()
 	s.FuncName = t.FuncName
 	s.Time = t.Time
+	s.Path = t.Path
+	s.Error = t.Error
+	s.Host = t.NodeName
+	s.Duration = t.Duration
+	s.StatusMsg = t.Message
+	s.Extra = t.Custom
 
 	switch t.TraceType {
-	case madmin.TraceStorage:
-		s.Path = t.StorageStats.Path
-		s.Host = t.NodeName
-		s.StorageStats.Duration = t.StorageStats.Duration
-	case madmin.TraceOS:
-		s.Path = t.OSStats.Path
-		s.Host = t.NodeName
-		s.OSStats.Duration = t.OSStats.Duration
-	case madmin.TraceHTTP:
-		s.Host = t.NodeName
-		s.Path = t.ReqInfo.Path
-		s.Query = t.ReqInfo.RawQuery
-		s.StatusCode = t.RespInfo.StatusCode
-		s.StatusMsg = http.StatusText(t.RespInfo.StatusCode)
-		s.Client = t.ReqInfo.Client
-		s.CallStats.Duration = t.CallStats.Latency
-		s.CallStats.Rx = t.CallStats.InputBytes
-		s.CallStats.Tx = t.CallStats.OutputBytes
-
-		// Support older versions of MinIO server
-		s.Time = t.ReqInfo.Time
+	case madmin.TraceS3, madmin.TraceInternal:
+		s.Query = t.HTTP.ReqInfo.RawQuery
+		s.StatusCode = t.HTTP.RespInfo.StatusCode
+		s.StatusMsg = http.StatusText(t.HTTP.RespInfo.StatusCode)
+		s.Client = t.HTTP.ReqInfo.Client
+		s.CallStats = &callStats{}
+		s.CallStats.Duration = t.Duration
+		s.CallStats.Rx = t.HTTP.CallStats.InputBytes
+		s.CallStats.Tx = t.HTTP.CallStats.OutputBytes
 	}
 	return s
 }
@@ -442,17 +597,26 @@ func (s shortTraceMsg) String() string {
 	fmt.Fprintf(b, "%s ", s.Time.Local().Format(traceTimeFormat))
 
 	switch s.trcType {
-	case madmin.TraceStorage:
-		fmt.Fprintf(b, "[%s] %s %s %s %2s", console.Colorize("RespStatus", "STORAGE"), console.Colorize("FuncName", s.FuncName),
+	case madmin.TraceS3, madmin.TraceInternal:
+	case madmin.TraceBootstrap:
+		fmt.Fprintf(b, "[%s] %s %s %s", console.Colorize("RespStatus", strings.ToUpper(s.trcType.String())), console.Colorize("FuncName", s.FuncName),
 			hostStr,
-			s.Path,
-			console.Colorize("HeaderValue", s.StorageStats.Duration))
+			s.StatusMsg,
+		)
 		return b.String()
-	case madmin.TraceOS:
-		fmt.Fprintf(b, "[%s] %s %s %s %2s", console.Colorize("RespStatus", "OS"), console.Colorize("FuncName", s.FuncName),
-			hostStr,
-			s.Path,
-			console.Colorize("HeaderValue", s.OSStats.Duration))
+	default:
+		if s.Error != "" {
+			fmt.Fprintf(b, "[%s] %s %s %s err='%s' %2s", console.Colorize("RespStatus", strings.ToUpper(s.trcType.String())), console.Colorize("FuncName", s.FuncName),
+				hostStr,
+				s.Path,
+				console.Colorize("ErrStatus", s.Error),
+				console.Colorize("HeaderValue", s.Duration))
+		} else {
+			fmt.Fprintf(b, "[%s] %s %s %s %2s", console.Colorize("RespStatus", strings.ToUpper(s.trcType.String())), console.Colorize("FuncName", s.FuncName),
+				hostStr,
+				s.Path,
+				console.Colorize("HeaderValue", s.Duration))
+		}
 		return b.String()
 	}
 
@@ -494,24 +658,36 @@ func colorizedNodeName(nodeName string) string {
 }
 
 func (t traceMessage) JSON() string {
-	t.Status = "success"
-	rqHdrs := make(map[string]string)
-	rspHdrs := make(map[string]string)
-	rq := t.Trace.ReqInfo
-	rs := t.Trace.RespInfo
-	for k, v := range rq.Headers {
-		rqHdrs[k] = strings.Join(v, " ")
-	}
-	for k, v := range rs.Headers {
-		rspHdrs[k] = strings.Join(v, " ")
-	}
 	trc := verboseTrace{
-		trcType:  t.Trace.TraceType,
-		Type:     toTypeStr(t.Trace.TraceType),
-		NodeName: t.Trace.NodeName,
-		FuncName: t.Trace.FuncName,
-		Time:     t.Trace.Time,
-		RequestInfo: requestInfo{
+		trcType:    t.Trace.TraceType,
+		Type:       t.Trace.TraceType.String(),
+		NodeName:   t.Trace.NodeName,
+		FuncName:   t.Trace.FuncName,
+		Time:       t.Trace.Time,
+		Duration:   t.Trace.Duration,
+		Path:       t.Trace.Path,
+		Error:      t.Trace.Error,
+		HealResult: t.Trace.HealResult,
+		Message:    t.Trace.Message,
+		Extra:      t.Trace.Custom,
+	}
+
+	if t.Trace.HTTP != nil {
+		rq := t.Trace.HTTP.ReqInfo
+		rs := t.Trace.HTTP.RespInfo
+
+		var (
+			rqHdrs  = make(map[string]string)
+			rspHdrs = make(map[string]string)
+		)
+		for k, v := range rq.Headers {
+			rqHdrs[k] = strings.Join(v, " ")
+		}
+		for k, v := range rs.Headers {
+			rspHdrs[k] = strings.Join(v, " ")
+		}
+
+		trc.RequestInfo = &requestInfo{
 			Time:     rq.Time,
 			Proto:    rq.Proto,
 			Method:   rq.Method,
@@ -519,27 +695,19 @@ func (t traceMessage) JSON() string {
 			RawQuery: rq.RawQuery,
 			Body:     string(rq.Body),
 			Headers:  rqHdrs,
-		},
-		ResponseInfo: responseInfo{
+		}
+		trc.ResponseInfo = &responseInfo{
 			Time:       rs.Time,
 			Body:       string(rs.Body),
 			Headers:    rspHdrs,
 			StatusCode: rs.StatusCode,
-		},
-		CallStats: callStats{
-			Duration: t.Trace.CallStats.Latency,
-			Rx:       t.Trace.CallStats.InputBytes,
-			Tx:       t.Trace.CallStats.OutputBytes,
-			Ttfb:     t.Trace.CallStats.TimeToFirstByte,
-		},
-		OSStats: osStats{
-			Duration: t.Trace.OSStats.Duration,
-			Path:     t.Trace.OSStats.Path,
-		},
-		StorageStats: storageStats{
-			Duration: t.Trace.StorageStats.Duration,
-			Path:     t.Trace.StorageStats.Path,
-		},
+		}
+		trc.CallStats = &callStats{
+			Duration: t.Trace.Duration,
+			Rx:       t.Trace.HTTP.CallStats.InputBytes,
+			Tx:       t.Trace.HTTP.CallStats.OutputBytes,
+			Ttfb:     t.Trace.HTTP.CallStats.TimeToFirstByte,
+		}
 	}
 	buf := &bytes.Buffer{}
 	enc := json.NewEncoder(buf)
@@ -560,18 +728,32 @@ func (t traceMessage) String() string {
 	if trc.NodeName != "" {
 		nodeNameStr = fmt.Sprintf("%s ", colorizedNodeName(trc.NodeName))
 	}
-
+	extra := ""
+	if len(t.Trace.Custom) > 0 {
+		for k, v := range t.Trace.Custom {
+			extra = fmt.Sprintf("%s %s=%s", extra, k, v)
+		}
+		extra = console.Colorize("Extra", extra)
+	}
 	switch trc.TraceType {
-	case madmin.TraceStorage:
-		fmt.Fprintf(b, "%s %s [%s] %s %s", nodeNameStr, console.Colorize("Request", fmt.Sprintf("[STORAGE %s]", trc.FuncName)), trc.Time.Local().Format(traceTimeFormat), trc.StorageStats.Path, trc.StorageStats.Duration)
+	case madmin.TraceS3, madmin.TraceInternal:
+		if trc.HTTP == nil {
+			return ""
+		}
+	case madmin.TraceBootstrap:
+		fmt.Fprintf(b, "%s %s [%s] %s%s", nodeNameStr, console.Colorize("Request", fmt.Sprintf("[%s %s]", strings.ToUpper(trc.TraceType.String()), trc.FuncName)), trc.Time.Local().Format(traceTimeFormat), trc.Message, extra)
 		return b.String()
-	case madmin.TraceOS:
-		fmt.Fprintf(b, "%s %s [%s] %s %s", nodeNameStr, console.Colorize("Request", fmt.Sprintf("[OS %s]", trc.FuncName)), trc.Time.Local().Format(traceTimeFormat), trc.OSStats.Path, trc.OSStats.Duration)
+	default:
+		if trc.Error != "" {
+			fmt.Fprintf(b, "%s %s [%s] %s%s err='%s' %s", nodeNameStr, console.Colorize("Request", fmt.Sprintf("[%s %s]", strings.ToUpper(trc.TraceType.String()), trc.FuncName)), trc.Time.Local().Format(traceTimeFormat), trc.Path, extra, console.Colorize("ErrStatus", trc.Error), trc.Duration)
+		} else {
+			fmt.Fprintf(b, "%s %s [%s] %s%s %s", nodeNameStr, console.Colorize("Request", fmt.Sprintf("[%s %s]", strings.ToUpper(trc.TraceType.String()), trc.FuncName)), trc.Time.Local().Format(traceTimeFormat), trc.Path, extra, trc.Duration)
+		}
 		return b.String()
 	}
 
-	ri := trc.ReqInfo
-	rs := trc.RespInfo
+	ri := trc.HTTP.ReqInfo
+	rs := trc.HTTP.RespInfo
 	fmt.Fprintf(b, "%s%s", nodeNameStr, console.Colorize("Request", fmt.Sprintf("[REQUEST %s] ", trc.FuncName)))
 	fmt.Fprintf(b, "[%s] %s\n", ri.Time.Local().Format(traceTimeFormat), console.Colorize("Host", fmt.Sprintf("[Client IP: %s]", ri.Client)))
 	fmt.Fprintf(b, "%s%s", nodeNameStr, console.Colorize("Method", fmt.Sprintf("%s %s", ri.Method, ri.Path)))
@@ -594,7 +776,7 @@ func (t traceMessage) String() string {
 	fmt.Fprintf(b, "%s%s", nodeNameStr, console.Colorize("Body", fmt.Sprintf("%s\n", string(ri.Body))))
 	fmt.Fprintf(b, "%s%s", nodeNameStr, console.Colorize("Response", "[RESPONSE] "))
 	fmt.Fprintf(b, "[%s] ", rs.Time.Local().Format(traceTimeFormat))
-	fmt.Fprint(b, console.Colorize("Stat", fmt.Sprintf("[ Duration %2s  ↑ %s  ↓ %s ]\n", trc.CallStats.Latency.Round(time.Microsecond), humanize.IBytes(uint64(trc.CallStats.InputBytes)), humanize.IBytes(uint64(trc.CallStats.OutputBytes)))))
+	fmt.Fprint(b, console.Colorize("Stat", fmt.Sprintf("[ Duration %2s  ↑ %s  ↓ %s ]\n", trc.Duration.Round(time.Microsecond), humanize.IBytes(uint64(trc.HTTP.CallStats.InputBytes)), humanize.IBytes(uint64(trc.HTTP.CallStats.OutputBytes)))))
 
 	statusStr := console.Colorize("RespStatus", fmt.Sprintf("%d %s", rs.StatusCode, http.StatusText(rs.StatusCode)))
 	if rs.StatusCode != http.StatusOK {
@@ -605,6 +787,9 @@ func (t traceMessage) String() string {
 	for k, v := range rs.Headers {
 		fmt.Fprintf(b, "%s%s", nodeNameStr, console.Colorize("RespHeaderKey",
 			fmt.Sprintf("%s: ", k))+console.Colorize("HeaderValue", fmt.Sprintf("%s\n", strings.Join(v, ","))))
+	}
+	if len(extra) > 0 {
+		fmt.Fprintf(b, "%s%s\n", nodeNameStr, extra)
 	}
 	fmt.Fprintf(b, "%s%s\n", nodeNameStr, console.Colorize("Body", string(rs.Body)))
 	fmt.Fprint(b, nodeNameStr)

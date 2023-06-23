@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -42,7 +42,7 @@ type errorMessage struct {
 	Cause     causeMessage       `json:"cause"`
 	Type      string             `json:"type"`
 	CallTrace []probe.TracePoint `json:"trace,omitempty"`
-	SysInfo   map[string]string  `json:"sysinfo"`
+	SysInfo   map[string]string  `json:"sysinfo,omitempty"`
 }
 
 // fatalIf wrapper function which takes error and selectively prints stack frames if available on debug
@@ -62,10 +62,10 @@ func fatal(err *probe.Error, msg string, data ...interface{}) {
 				Message: err.ToGoError().Error(),
 				Error:   err.ToGoError(),
 			},
-			SysInfo: err.SysInfo,
 		}
 		if globalDebug {
 			errorMsg.CallTrace = err.CallTrace
+			errorMsg.SysInfo = err.SysInfo
 		}
 		json, e := json.MarshalIndent(struct {
 			Status string       `json:"status"`
@@ -84,11 +84,12 @@ func fatal(err *probe.Error, msg string, data ...interface{}) {
 	msg = fmt.Sprintf(msg, data...)
 	errmsg := err.String()
 	if !globalDebug {
-		e := err.ToGoError()
-		if errors.Is(e, context.Canceled) {
-			// This will replace context canceled error message
-			// that the user is seeing to a better one.
+		var e error
+		if errors.Is(globalContext.Err(), context.Canceled) {
+			// mc is getting killed
 			e = errors.New("Canceling upon user request")
+		} else {
+			e = err.ToGoError()
 		}
 		errmsg = e.Error()
 	}
@@ -139,10 +140,10 @@ func errorIf(err *probe.Error, msg string, data ...interface{}) {
 				Message: err.ToGoError().Error(),
 				Error:   err.ToGoError(),
 			},
-			SysInfo: err.SysInfo,
 		}
 		if globalDebug {
 			errorMsg.CallTrace = err.CallTrace
+			errorMsg.SysInfo = err.SysInfo
 		}
 		json, e := json.MarshalIndent(struct {
 			Status string       `json:"status"`
@@ -159,14 +160,21 @@ func errorIf(err *probe.Error, msg string, data ...interface{}) {
 	}
 	msg = fmt.Sprintf(msg, data...)
 	if !globalDebug {
-		e := err.ToGoError()
-		if errors.Is(e, context.Canceled) {
-			// This will replace context canceled error message
-			// that the user is seeing to a better one.
+		var e error
+		if errors.Is(globalContext.Err(), context.Canceled) {
+			// mc is getting killed
 			e = errors.New("Canceling upon user request")
+		} else {
+			e = err.ToGoError()
 		}
 		console.Errorln(fmt.Sprintf("%s %s", msg, e))
 		return
 	}
 	console.Errorln(fmt.Sprintf("%s %s", msg, err))
+}
+
+// deprecatedError function for deprecated commands
+func deprecatedError(newCommandName string) {
+	err := probe.NewError(fmt.Errorf("Please use '%s' instead", newCommandName))
+	fatal(err, "Deprecated command")
 }

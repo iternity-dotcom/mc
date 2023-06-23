@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -61,7 +61,7 @@ EXAMPLES:
 // checkAdminUserSvcAcctInfoSyntax - validate all the passed arguments
 func checkAdminUserSvcAcctInfoSyntax(ctx *cli.Context) {
 	if len(ctx.Args()) != 2 {
-		cli.ShowCommandHelpAndExit(ctx, "info", 1)
+		showCommandHelpAndExit(ctx, 1)
 	}
 }
 
@@ -69,7 +69,7 @@ func checkAdminUserSvcAcctInfoSyntax(ctx *cli.Context) {
 func mainAdminUserSvcAcctInfo(ctx *cli.Context) error {
 	checkAdminUserSvcAcctInfoSyntax(ctx)
 
-	console.SetColor("SVCMessage", color.New(color.FgGreen))
+	console.SetColor("AccMessage", color.New(color.FgGreen))
 
 	// Get the alias parameter from cli
 	args := ctx.Args()
@@ -95,13 +95,16 @@ func mainAdminUserSvcAcctInfo(ctx *cli.Context) error {
 		return nil
 	}
 
-	printMsg(svcAcctMessage{
-		op:            "info",
+	printMsg(acctMessage{
+		op:            svcAccOpInfo,
 		AccessKey:     svcAccount,
+		Name:          svcInfo.Name,
+		Description:   svcInfo.Description,
 		AccountStatus: svcInfo.AccountStatus,
 		ParentUser:    svcInfo.ParentUser,
 		ImpliedPolicy: svcInfo.ImpliedPolicy,
 		Policy:        json.RawMessage(svcInfo.Policy),
+		Expiration:    svcInfo.Expiration,
 	})
 
 	return nil

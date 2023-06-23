@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -18,6 +18,8 @@
 package cmd
 
 import (
+	"strings"
+
 	"github.com/fatih/color"
 	"github.com/minio/cli"
 	"github.com/minio/mc/pkg/probe"
@@ -49,7 +51,7 @@ EXAMPLES:
 // checkAdminUserAddSyntax - validate all the passed arguments
 func checkAdminUserInfoSyntax(ctx *cli.Context) {
 	if len(ctx.Args()) != 2 {
-		cli.ShowCommandHelpAndExit(ctx, "info", 1) // last argument is exit code
+		showCommandHelpAndExit(ctx, 1) // last argument is exit code
 	}
 }
 
@@ -70,12 +72,26 @@ func mainAdminUserInfo(ctx *cli.Context) error {
 	user, e := client.GetUserInfo(globalContext, args.Get(1))
 	fatalIf(probe.NewError(e).Trace(args...), "Unable to get user info")
 
+	memberOf := []userGroup{}
+	for _, group := range user.MemberOf {
+		gd, e := client.GetGroupDescription(globalContext, group)
+		fatalIf(probe.NewError(e).Trace(args...), "Unable to fetch group info")
+		policies := []string{}
+		if gd.Policy != "" {
+			policies = strings.Split(gd.Policy, ",")
+		}
+		memberOf = append(memberOf, userGroup{
+			Name:     gd.Name,
+			Policies: policies,
+		})
+	}
+
 	printMsg(userMessage{
-		op:         "info",
+		op:         ctx.Command.Name,
 		AccessKey:  args.Get(1),
 		PolicyName: user.PolicyName,
 		UserStatus: string(user.Status),
-		MemberOf:   user.MemberOf,
+		MemberOf:   memberOf,
 	})
 
 	return nil

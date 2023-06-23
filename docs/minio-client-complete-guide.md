@@ -35,6 +35,8 @@ replicate   configure server side bucket replication
 admin       manage MinIO servers
 update      update mc to latest release
 support     supportability tools like  profile, register, callhome, inspect
+ping        perform liveness check
+quota       manage bucket quota
 ```
 
 ## 1.  Download MinIO Client
@@ -325,10 +327,11 @@ mc version RELEASE.2020-04-25T00-43-23Z
 | [**update** - manage software updates](#update)                                         | [**watch** - watch for events](#watch)                              | [**retention** - set retention for object(s)](#retention)  | [**sql** - run sql queries on objects](#sql)       |
 | [**head** - display first 'n' lines of an object](#head)                                | [**stat** - stat contents of objects and folders](#stat)            | [**legalhold** - set legal hold for object(s)](#legalhold) | [**mv** - move objects](#mv)                       |
 | [**du** - summarize disk usage recursively](#du)                                        | [**tag** - manage tags for bucket and object(s)](#tag)              | [**admin** - manage MinIO servers](#admin)                 | [**support** - generate profile data for debugging purposes](#support) |
+| [**ping** - perform liveness check](#ping)                                        |                                                                     |                                                            |                                                    |
 
 
 
-###  Command `ls`
+###  Command `ls`  
 `ls` command lists files, buckets and objects. Use `--incomplete` flag to list partially copied content.
 
 ```
@@ -1529,7 +1532,7 @@ mc tag set --versions --rewind 7d play/testbucket/testobject "status=old"
 
 <a name="admin"></a>
 ### Command `admin`
-Please visit [here](https://docs.min.io/docs/minio-admin-complete-guide) for a more comprehensive admin guide.
+Please visit [here](https://min.io/docs/minio/linux/reference/minio-mc-admin.html?ref=gh) for a more comprehensive admin guide.
 
 <a name="alias"></a>
 ### Command `alias`
@@ -1810,11 +1813,14 @@ USAGE:
 
 COMMANDS:
   add     add a server side replication configuration rule
-  edit    modify an existing server side replication cofiguration rule
+  update  modify an existing server side replication configuration rule
   ls      list server side replication configuration rules
+  status  show server side replication status
+  resync  re-replicate all previously replicated objects
   export  export server side replication configuration
   import  import server side replication configuration in JSON format
-  rm      remove a server side replication configuration rule(s)
+  rm      remove a server side replication configuration rule
+  diff    show unreplicated object versions
 
 FLAGS:
   --help, -h                    show help
@@ -1823,43 +1829,51 @@ FLAGS:
 *Example: Add replication configuration rule on `mybucket` on alias `myminio`. Enable delete marker replication and replication of versioned deletes for the configuration*
 
 ```
-mc replicate add myminio/mybucket/prefix --tags "key1=value1&key2=value2" --storage-class "STANDARD" --remote-bucket 'arn:minio:replication:us-east-1:c5be6b16-769d-432a-9ef1-4567081f3566:destbucket' --priority 1 --replicate "delete-marker,delete"
+mc replicate add myminio/mybucket/prefix --tags "key1=value1&key2=value2" --storage-class "STANDARD" --remote-bucket "http://minio3:minio123@localhost:9006/bucket" --priority 1
 Replication configuration rule applied to myminio/mybucket/prefix.
 ```
 
 *Example:  Disable replication configuration rule with rule Id "bsibgh8t874dnjst8hkg" on bucket "mybucket" with prefix "prefix" for alias `myminio`*
 
 ```
-mc replicate edit myminio/mybucket/prefix --id "bsibgh8t874dnjst8hkg" --state disable
+mc replicate update myminio/mybucket/prefix --id "bsibgh8t874dnjst8hkg" --state disable
 Replication configuration rule with ID `bsibgh8t874dnjst8hkg` applied to myminio/mybucket/prefix.
 ```
 
 *Example:  Change priority of rule with rule ID "bsibgh8t874dnjst8hkg" on bucket "mybucket" for alias `myminio`.*
 
 ```
-mc replicate edit myminio/mybucket/prefix --id "bsibgh8t874dnjst8hkg" --priority 3
+mc replicate update myminio/mybucket/prefix --id "bsibgh8t874dnjst8hkg" --priority 3
 Replication configuration rule with ID `bsibgh8t874dnjst8hkg` applied to myminio/mybucket/prefix.
 ```
 
 *Example: Clear tags on rule ID "bsibgh8t874dnjst8hkg" for target myminio/bucket which has a replication configuration rule with prefix "prefix"*
 
 ```
-mc replicate edit myminio/mybucket/prefix --id "bsibgh8t874dnjst8hkg" --tags ""
+mc replicate update myminio/mybucket/prefix --id "bsibgh8t874dnjst8hkg" --tags ""
 Replication configuration rule with ID `bsibgh8t874dnjst8hkg` applied to myminio/mybucket/prefix successfully.
 ```
 
 *Example: Enable delete marker replication and versioned delete replication on rule ID "bsibgh8t874dnjst8hkg" for target myminio/bucket which has a replication configuration rule with prefix "prefix"
 
 ```
-mc replicate edit myminio/mybucket/prefix --id "bsibgh8t874dnjst8hkg" --replicate "delete,delete-marker"
+mc replicate update myminio/mybucket/prefix --id "bsibgh8t874dnjst8hkg" --replicate "delete,delete-marker"
 Replication configuration rule with ID `bsibgh8t874dnjst8hkg` applied to myminio/mybucket/prefix successfully.
 ```
 *Example: Disable delete marker and versioned delete replication on rule ID "bsibgh8t874dnjst8hkg" for target myminio/bucket which has a replication configuration rule with prefix "prefix"
 
 ```
-mc replicate edit myminio/mybucket/prefix --id "bsibgh8t874dnjst8hkg" --replicate ""
+mc replicate update myminio/mybucket/prefix --id "bsibgh8t874dnjst8hkg" --replicate ""
 Replication configuration rule with ID `bsibgh8t874dnjst8hkg` applied to myminio/mybucket/prefix successfully.
 ```
+
+*Example:  Edit credentials for remote target with replication rule ID kxYD.491
+
+```
+$ mc replicate update myminio/mybucket --id "kxYD.491" --remote-bucket
+https://foobar:newpassword@minio.siteb.example.com/targetbucket
+```
+
 *Example: List replication configuration rules set on `mybucket` on alias `myminio`*
 
 ```
@@ -1922,6 +1936,8 @@ NAME:
   mc support perf               analyze object, network and drive performance
   mc support inspect            upload raw object contents for analysis
   mc support profile            generate profile data for debugging
+  mc support logs               configure/display MinIO console logs
+  mc support top                provide top like statistics for MinIO
 
 ```
 
@@ -1953,4 +1969,93 @@ mc support diag play
 Get CPU profiling for 2 minutes
 ```
 mc support profile  --type cpu --duration 120 myminio/
+```
+
+Print last 5 application error logs entries for node 'node1' on MinIO server with alias 'myminio'
+```
+mc support logs show --last 5 --type application myminio node1
+```
+
+Enable logs for cluster with alias 'play'
+```
+mc support logs enable play
+```
+
+Get a list of the 10 oldest locks on a distributed MinIO cluster, where 'myminio' is the MinIO cluster alias.*
+```
+mc admin top locks myminio
+```
+
+Display current in-progress all 's3.PutObject' API calls.
+```
+mc support top api --name s3.PutObject myminio/
+```
+
+
+<a name="ping"></a>
+### Command `ping`
+`rb` command to perform liveness check
+
+```
+USAGE:
+   mc ping [FLAGS] TARGET
+
+FLAGS:
+  --count value, -c value        perform liveliness check for count number of times (default: 0)
+  --error-count value, -e value  exit after N consecutive ping errors
+  --interval value, -i value     wait interval between each request in seconds (default: 1)
+  --distributed, -a              ping all the servers in the cluster, use it when you have direct access to nodes/pods
+  --help, -h                     show help
+
+
+```
+
+*Example: Perform liveness check on https://play.min.io.*
+
+
+```
+mc ping play
+1: https://play.min.io:   min=919.538ms   max=919.538ms   average=919.538ms   errors=0   roundtrip=919.538ms
+2: https://play.min.io:   min=278.356ms   max=919.538ms   average=598.947ms   errors=0   roundtrip=278.356ms
+3: https://play.min.io:   min=278.356ms   max=919.538ms   average=504.759ms   errors=0   roundtrip=316.384ms
+```
+
+<a name="quota"></a>
+
+### Command `quota` - Manage bucket quota
+`quota` command to set or get bucket quota on MinIO server.
+
+```
+NAME:
+  mc quota - manage bucket quota
+
+USAGE:
+  set    set bucket quota
+  info   show bucket quota
+  clear  clear bucket quota
+
+QUOTA
+  quota accepts human-readable case-insensitive number
+  suffixes such as "k", "m", "g" and "t" referring to the metric units KB,
+  MB, GB and TB respectively. Adding an "i" to these prefixes, uses the IEC
+  units, so that "gi" refers to "gibibyte" or "GiB". A "b" at the end is
+  also accepted. Without suffixes the unit is bytes.
+
+```
+*Example: Show bucket quota on bucket 'mybucket' on MinIO.*
+
+```
+mc quota info myminio/mybucket
+```
+
+*Example: Set a hard bucket quota of 64Mb for bucket 'mybucket' on MinIO.*
+
+```
+mc quota set myminio/mybucket --size 64MB
+```
+
+*Example: Reset bucket quota configured for bucket 'mybucket' on MinIO.*
+
+```
+mc quota clear myminio/mybucket
 ```

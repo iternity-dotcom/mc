@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -22,11 +22,13 @@ import "github.com/minio/cli"
 var adminServiceSubcommands = []cli.Command{
 	adminServiceRestartCmd,
 	adminServiceStopCmd,
+	adminServiceUnfreezeCmd,
+	adminServiceFreezeCmd,
 }
 
 var adminServiceCmd = cli.Command{
 	Name:            "service",
-	Usage:           "restart and stop all MinIO servers",
+	Usage:           "restart, stop and unfreeze a MinIO cluster",
 	Action:          mainAdminService,
 	Before:          setGlobalsFromContext,
 	Flags:           globalFlags,

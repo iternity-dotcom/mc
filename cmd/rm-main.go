@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -97,8 +97,8 @@ var (
 			Usage: "remove object(s) versions that are non-current",
 		},
 		cli.BoolFlag{
-			Name:   "force-delete",
-			Usage:  "attempt a prefix force delete, requires confirmation please use with caution",
+			Name:   "purge",
+			Usage:  "attempt a prefix purge, requires confirmation please use with caution - only works with '--force'",
 			Hidden: true,
 		},
 	}
@@ -180,10 +180,12 @@ type rmMessage struct {
 
 // Colorized message for console printing.
 func (r rmMessage) String() string {
-	msg := console.Colorize("Remove", fmt.Sprintf("Removing `%s`", r.Key))
+	msg := "Removed "
+
 	if r.DeleteMarker {
-		msg = console.Colorize("Remove", fmt.Sprintf("Creating delete marker `%s`", r.Key))
+		msg = "Created delete marker "
 	}
+	msg += console.Colorize("Removed", fmt.Sprintf("`%s`", r.Key))
 	if r.VersionID != "" {
 		msg += fmt.Sprintf(" (versionId=%s)", r.VersionID)
 	}
@@ -208,7 +210,7 @@ func checkRmSyntax(ctx context.Context, cliCtx *cli.Context, encKeyDB map[string
 	isDangerous := cliCtx.Bool("dangerous")
 	isVersions := cliCtx.Bool("versions")
 	isNoncurrentVersion := cliCtx.Bool("non-current")
-	isForceDel := cliCtx.Bool("force-delete")
+	isForceDel := cliCtx.Bool("purge")
 	versionID := cliCtx.String("version-id")
 	rewind := cliCtx.String("rewind")
 	isNamespaceRemoval := false
@@ -225,14 +227,17 @@ func checkRmSyntax(ctx context.Context, cliCtx *cli.Context, encKeyDB map[string
 
 	if isForceDel && !isForce {
 		fatalIf(errDummy().Trace(),
-			"You cannot specify --force-delete without --force.")
+			"You cannot specify --purge without --force.")
 	}
 
 	if isForceDel && isRecursive {
 		fatalIf(errDummy().Trace(),
-			"You cannot specify --force-delete with --recursive.")
+			"You cannot specify --purge with --recursive.")
 	}
-
+	if isForceDel && (isNoncurrentVersion || isVersions || cliCtx.IsSet("older-than") || cliCtx.IsSet("newer-than") || versionID != "") {
+		fatalIf(errDummy().Trace(),
+			"You cannot specify --purge flag with any flag(s) other than --force.")
+	}
 	for _, url := range cliCtx.Args() {
 		// clean path for aliases like s3/.
 		// Note: UNC path using / works properly in go 1.9.2 even though it breaks the UNC specification.
@@ -255,7 +260,7 @@ func checkRmSyntax(ctx context.Context, cliCtx *cli.Context, encKeyDB map[string
 	}
 	if !cliCtx.Args().Present() && !isStdin {
 		exitCode := 1
-		cli.ShowCommandHelpAndExit(cliCtx, "rm", exitCode)
+		showCommandHelpAndExit(cliCtx, exitCode)
 	}
 
 	// For all recursive or versions bulk deletion operations make sure to check for 'force' flag.
@@ -355,6 +360,8 @@ func removeSingle(url, versionID string, opts removeOpts) error {
 			}
 			printMsg(msg)
 		}
+	} else {
+		printDryRunMsg(content, opts.withVersions)
 	}
 	return nil
 }
@@ -374,21 +381,22 @@ type removeOpts struct {
 	encKeyDB          map[string][]prefixSSEPair
 }
 
-func printDryRunMsg(content *ClientContent) {
-	if globalJSON {
+func printDryRunMsg(content *ClientContent, printModTime bool) {
+	if globalJSON || content == nil {
 		return
 	}
-	if content.VersionID != "" {
-		fmt.Println("DRYRUN: Removing ", content.URL.Path, "version:", content.VersionID)
+	if printModTime {
+		fmt.Println("DRYRUN: Removing ", content.VersionID, content.Time.Format(printDate), content.URL.Path)
 		return
 	}
 	fmt.Println("DRYRUN: Removing ", content.URL.Path)
 }
 
 // listAndRemove uses listing before removal, it can list recursively or not, with versions or not.
-//   Use cases:
-//      * Remove objects recursively
-//      * Remove all versions of a single object
+//
+//	Use cases:
+//	   * Remove objects recursively
+//	   * Remove all versions of a single object
 func listAndRemove(url string, opts removeOpts) error {
 	ctx, cancelRemove := context.WithCancel(globalContext)
 	defer cancelRemove()
@@ -464,7 +472,7 @@ func listAndRemove(url string, opts removeOpts) error {
 					}
 
 					if opts.isFake {
-						printDryRunMsg(content)
+						printDryRunMsg(content, true)
 						continue
 					}
 
@@ -536,10 +544,14 @@ func listAndRemove(url string, opts removeOpts) error {
 					if result.Err != nil {
 						errorIf(result.Err.Trace(path),
 							"Failed to remove `"+path+"`.")
-						switch result.Err.ToGoError().(type) {
+						switch e := result.Err.ToGoError().(type) {
 						case PathInsufficientPermission:
 							// Ignore Permission error.
 							continue
+						case minio.ErrorResponse:
+							if strings.Contains(e.Message, "Object is WORM protected and cannot be overwritten") {
+								continue
+							}
 						}
 						close(contentCh)
 						return exitStatus(globalErrorExitStatus)
@@ -556,7 +568,7 @@ func listAndRemove(url string, opts removeOpts) error {
 				}
 			}
 		} else {
-			printDryRunMsg(content)
+			printDryRunMsg(content, opts.withVersions)
 		}
 	}
 
@@ -581,7 +593,7 @@ func listAndRemove(url string, opts removeOpts) error {
 			}
 
 			if opts.isFake {
-				printDryRunMsg(content)
+				printDryRunMsg(content, true)
 				continue
 			}
 
@@ -677,7 +689,7 @@ func mainRm(cliCtx *cli.Context) error {
 	olderThan := cliCtx.String("older-than")
 	newerThan := cliCtx.String("newer-than")
 	isForce := cliCtx.Bool("force")
-	isForceDel := cliCtx.Bool("force-delete")
+	isForceDel := cliCtx.Bool("purge")
 	withNoncurrentVersion := cliCtx.Bool("non-current")
 	withVersions := cliCtx.Bool("versions")
 	versionID := cliCtx.String("version-id")
@@ -688,7 +700,7 @@ func mainRm(cliCtx *cli.Context) error {
 	}
 
 	// Set color.
-	console.SetColor("Remove", color.New(color.FgGreen, color.Bold))
+	console.SetColor("Removed", color.New(color.FgGreen, color.Bold))
 
 	var rerr error
 	var e error

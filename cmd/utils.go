@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -34,11 +35,9 @@ import (
 	"time"
 
 	"github.com/mattn/go-ieproxy"
-	"github.com/minio/cli"
-	"github.com/minio/madmin-go"
+	"github.com/minio/madmin-go/v3"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/encrypt"
-	"maze.io/x/duration"
 
 	jwtgo "github.com/golang-jwt/jwt/v4"
 	"github.com/minio/mc/pkg/probe"
@@ -76,16 +75,11 @@ func UTCNow() time.Time {
 	return time.Now().UTC()
 }
 
-var letters = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
-
-// newRandomID generates a random id of regular lower case and uppercase english characters.
-func newRandomID(n int) string {
-	rand.Seed(UTCNow().UnixNano())
-	sid := make([]rune, n)
-	for i := range sid {
-		sid[i] = letters[rand.Intn(len(letters))]
+func max(a, b int) int {
+	if a > b {
+		return a
 	}
-	return string(sid)
+	return b
 }
 
 // randString generates random names and prepends them with a known prefix.
@@ -145,6 +139,10 @@ func NewS3Config(urlStr string, aliasCfg *aliasConfigV10) *Config {
 	s3Config.AppVersion = ReleaseTag
 	s3Config.Debug = globalDebug
 	s3Config.Insecure = globalInsecure
+	s3Config.ConnReadDeadline = globalConnReadDeadline
+	s3Config.ConnWriteDeadline = globalConnWriteDeadline
+	s3Config.UploadLimit = int64(globalLimitUpload)
+	s3Config.DownloadLimit = int64(globalLimitDownload)
 
 	s3Config.HostURL = urlStr
 	if aliasCfg != nil {
@@ -152,8 +150,8 @@ func NewS3Config(urlStr string, aliasCfg *aliasConfigV10) *Config {
 		s3Config.SecretKey = aliasCfg.SecretKey
 		s3Config.SessionToken = aliasCfg.SessionToken
 		s3Config.Signature = aliasCfg.API
+		s3Config.Lookup = getLookupType(aliasCfg.Path)
 	}
-	s3Config.Lookup = getLookupType(aliasCfg.Path)
 	return s3Config
 }
 
@@ -177,7 +175,7 @@ func isOlder(ti time.Time, olderRef string) bool {
 		return false
 	}
 	objectAge := time.Since(ti)
-	olderThan, e := duration.ParseDuration(olderRef)
+	olderThan, e := ParseDuration(olderRef)
 	fatalIf(probe.NewError(e), "Unable to parse olderThan=`"+olderRef+"`.")
 	return objectAge < time.Duration(olderThan)
 }
@@ -189,7 +187,7 @@ func isNewer(ti time.Time, newerRef string) bool {
 	}
 
 	objectAge := time.Since(ti)
-	newerThan, e := duration.ParseDuration(newerRef)
+	newerThan, e := ParseDuration(newerRef)
 	fatalIf(probe.NewError(e), "Unable to parse newerThan=`"+newerRef+"`.")
 	return objectAge >= time.Duration(newerThan)
 }
@@ -422,23 +420,19 @@ func centerText(s string, w int) string {
 	return sb.String()
 }
 
-func getAliasAndBucket(ctx *cli.Context) (string, string) {
-	args := ctx.Args()
-	aliasedURL := args.Get(0)
-	aliasedURL = filepath.Clean(aliasedURL)
-	return url2Alias(aliasedURL)
-}
-
 func getClient(aliasURL string) *madmin.AdminClient {
 	client, err := newAdminClient(aliasURL)
 	fatalIf(err, "Unable to initialize admin connection.")
 	return client
 }
 
-func httpClient(timeout time.Duration) *http.Client {
+func httpClient(reqTimeout time.Duration) *http.Client {
 	return &http.Client{
-		Timeout: timeout,
+		Timeout: reqTimeout,
 		Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout: 10 * time.Second,
+			}).DialContext,
 			Proxy: ieproxy.GetProxyFunc(),
 			TLSClientConfig: &tls.Config{
 				RootCAs: globalRootCAs,
@@ -447,13 +441,16 @@ func httpClient(timeout time.Duration) *http.Client {
 				// Can't use TLSv1.1 because of RC4 cipher usage
 				MinVersion: tls.VersionTLS12,
 			},
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 10 * time.Second,
 		},
 	}
 }
 
 func getPrometheusToken(hostConfig *aliasConfigV10) (string, error) {
-	jwt := jwtgo.NewWithClaims(jwtgo.SigningMethodHS512, jwtgo.StandardClaims{
-		ExpiresAt: UTCNow().Add(defaultPrometheusJWTExpiry).Unix(),
+	jwt := jwtgo.NewWithClaims(jwtgo.SigningMethodHS512, jwtgo.RegisteredClaims{
+		ExpiresAt: jwtgo.NewNumericDate(UTCNow().Add(defaultPrometheusJWTExpiry)),
 		Subject:   hostConfig.AccessKey,
 		Issuer:    "prometheus",
 	})

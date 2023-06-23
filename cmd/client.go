@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -45,9 +45,10 @@ const (
 
 // GetOptions holds options of the GET operation
 type GetOptions struct {
-	SSE       encrypt.ServerSide
-	VersionID string
-	Zip       bool
+	SSE        encrypt.ServerSide
+	VersionID  string
+	Zip        bool
+	RangeStart int64
 }
 
 // PutOptions holds options for PUT operation
@@ -59,6 +60,7 @@ type PutOptions struct {
 	storageClass          string
 	multipartSize         uint64
 	multipartThreads      uint
+	concurrentStream      bool
 }
 
 // StatOptions holds options of the HEAD operation
@@ -104,6 +106,7 @@ type Client interface {
 	// Bucket operations
 	MakeBucket(ctx context.Context, region string, ignoreExisting, withLock bool) *probe.Error
 	RemoveBucket(ctx context.Context, forceRemove bool) *probe.Error
+	ListBuckets(ctx context.Context) ([]*ClientContent, *probe.Error)
 
 	// Object lock config
 	SetObjectLockConfig(ctx context.Context, mode minio.RetentionMode, validity uint64, unit minio.ValidityUnit) *probe.Error
@@ -149,7 +152,7 @@ type Client interface {
 	DeleteTags(ctx context.Context, versionID string) *probe.Error
 
 	// Lifecycle operations
-	GetLifecycle(ctx context.Context) (*lifecycle.Configuration, *probe.Error)
+	GetLifecycle(ctx context.Context) (*lifecycle.Configuration, time.Time, *probe.Error)
 	SetLifecycle(ctx context.Context, config *lifecycle.Configuration) *probe.Error
 
 	// Versioning operations
@@ -172,6 +175,10 @@ type Client interface {
 
 	// Restore an object
 	Restore(ctx context.Context, versionID string, days int) *probe.Error
+
+	// OD operations
+	GetPart(ctx context.Context, part int) (io.ReadCloser, *probe.Error)
+	PutPart(ctx context.Context, reader io.Reader, size int64, progress io.Reader, opts PutOptions) (n int64, err *probe.Error)
 }
 
 // ClientContent - Content container for content metadata
@@ -183,6 +190,7 @@ type ClientContent struct {
 	Type         os.FileMode
 	StorageClass string
 	Metadata     map[string]string
+	Tags         map[string]string
 	UserMetadata map[string]string
 	ETag         string
 	Expires      time.Time
@@ -208,17 +216,21 @@ type ClientContent struct {
 
 // Config - see http://docs.amazonwebservices.com/AmazonS3/latest/dev/index.html?RESTAuthentication.html
 type Config struct {
-	AccessKey    string
-	SecretKey    string
-	SessionToken string
-	Signature    string
-	HostURL      string
-	AppName      string
-	AppVersion   string
-	Debug        bool
-	Insecure     bool
-	Lookup       minio.BucketLookupType
-	Transport    *http.Transport
+	AccessKey         string
+	SecretKey         string
+	SessionToken      string
+	Signature         string
+	HostURL           string
+	AppName           string
+	AppVersion        string
+	Debug             bool
+	Insecure          bool
+	Lookup            minio.BucketLookupType
+	ConnReadDeadline  time.Duration
+	ConnWriteDeadline time.Duration
+	UploadLimit       int64
+	DownloadLimit     int64
+	Transport         *http.Transport
 }
 
 // SelectObjectOpts - opts entered for select API

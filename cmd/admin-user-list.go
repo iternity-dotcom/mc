@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -18,6 +18,8 @@
 package cmd
 
 import (
+	"strings"
+
 	"github.com/fatih/color"
 	"github.com/minio/cli"
 	"github.com/minio/mc/pkg/probe"
@@ -26,6 +28,7 @@ import (
 
 var adminUserListCmd = cli.Command{
 	Name:         "list",
+	ShortName:    "ls",
 	Usage:        "list all users",
 	Action:       mainAdminUserList,
 	OnUsageError: onUsageError,
@@ -49,7 +52,7 @@ EXAMPLES:
 // checkAdminUserListSyntax - validate all the passed arguments
 func checkAdminUserListSyntax(ctx *cli.Context) {
 	if len(ctx.Args()) != 1 {
-		cli.ShowCommandHelpAndExit(ctx, "list", 1) // last argument is exit code
+		showCommandHelpAndExit(ctx, 1) // last argument is exit code
 	}
 }
 
@@ -75,10 +78,24 @@ func mainAdminUserList(ctx *cli.Context) error {
 	fatalIf(probe.NewError(e).Trace(args...), "Unable to list user")
 
 	for k, v := range users {
+		memberOf := []userGroup{}
+		for _, group := range v.MemberOf {
+			gd, e := client.GetGroupDescription(globalContext, group)
+			fatalIf(probe.NewError(e).Trace(args...), "Unable to fetch group info")
+			policies := []string{}
+			if gd.Policy != "" {
+				policies = strings.Split(gd.Policy, ",")
+			}
+			memberOf = append(memberOf, userGroup{
+				Name:     gd.Name,
+				Policies: policies,
+			})
+		}
 		printMsg(userMessage{
-			op:         "list",
+			op:         ctx.Command.Name,
 			AccessKey:  k,
 			PolicyName: v.PolicyName,
+			MemberOf:   memberOf,
 			UserStatus: string(v.Status),
 		})
 	}

@@ -18,15 +18,12 @@
 package cmd
 
 import (
-	"bytes"
 	"context"
 	gojson "encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"mime/multipart"
-	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -38,7 +35,7 @@ import (
 	"github.com/klauspost/compress/gzip"
 	"github.com/minio/cli"
 	json "github.com/minio/colorjson"
-	"github.com/minio/madmin-go"
+	"github.com/minio/madmin-go/v3"
 	"github.com/minio/mc/pkg/probe"
 	"github.com/minio/pkg/console"
 	"github.com/tidwall/gjson"
@@ -76,7 +73,7 @@ var supportDiagCmd = cli.Command{
 	OnUsageError: onUsageError,
 	Action:       mainSupportDiag,
 	Before:       setGlobalsFromContext,
-	Flags:        append(supportDiagFlags, globalFlags...),
+	Flags:        append(supportDiagFlags, supportGlobalFlags...),
 	CustomHelpTemplate: `NAME:
   {{.HelpName}} - {{.Usage}}
 
@@ -87,26 +84,26 @@ FLAGS:
   {{range .VisibleFlags}}{{.}}
   {{end}}
 EXAMPLES:
-  1. Upload MinIO diagnostics report for 'play' (https://play.min.io by default) to SUBNET
-     {{.Prompt}} {{.HelpName}} play
+  1. Upload MinIO diagnostics report for cluster with alias 'myminio' to SUBNET
+     {{.Prompt}} {{.HelpName}} myminio
 
-  2. Generate MinIO diagnostics report for alias 'play' (https://play.min.io by default) save and upload to SUBNET manually
-     {{.Prompt}} {{.HelpName}} play --airgap
+  2. Generate MinIO diagnostics report for cluster with alias 'myminio', save and upload to SUBNET manually
+     {{.Prompt}} {{.HelpName}} myminio --airgap
 `,
 }
 
 // checkSupportDiagSyntax - validate arguments passed by a user
 func checkSupportDiagSyntax(ctx *cli.Context) {
 	if len(ctx.Args()) == 0 || len(ctx.Args()) > 1 {
-		cli.ShowCommandHelpAndExit(ctx, "diag", 1) // last argument is exit code
+		showCommandHelpAndExit(ctx, 1) // last argument is exit code
 	}
 }
 
 // compress and tar MinIO diagnostics output
-func tarGZ(healthInfo interface{}, version string, filename string, showMessages bool) error {
-	f, err := os.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0o666)
-	if err != nil {
-		return err
+func tarGZ(healthInfo interface{}, version string, filename string) error {
+	f, e := os.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0o666)
+	if e != nil {
+		return e
 	}
 	defer f.Close()
 
@@ -119,15 +116,15 @@ func tarGZ(healthInfo interface{}, version string, filename string, showMessages
 		Version string `json:"version"`
 	}{Version: version}
 
-	if err := enc.Encode(header); err != nil {
-		return err
+	if e := enc.Encode(header); e != nil {
+		return e
 	}
 
-	if err := enc.Encode(healthInfo); err != nil {
-		return err
+	if e := enc.Encode(healthInfo); e != nil {
+		return e
 	}
 
-	if showMessages {
+	if globalAirgapped {
 		warningMsgBoundary := "*********************************************************************************"
 		warning := warnText("                                   WARNING!!")
 		warningContents := infoText(`     ** THIS FILE MAY CONTAIN SENSITIVE INFORMATION ABOUT YOUR ENVIRONMENT **
@@ -162,64 +159,31 @@ func mainSupportDiag(ctx *cli.Context) error {
 
 	// Get the alias parameter from cli
 	aliasedURL := ctx.Args().Get(0)
-	alias, _ := url2Alias(aliasedURL)
-
-	license, offline := fetchSubnetUploadFlags(ctx)
-
-	// license should be provided for us to reach subnet
-	// if `--airgap` is provided do not need to reach out.
-	uploadToSubnet := !offline
-	if uploadToSubnet {
-		fatalIf(checkURLReachable(subnetBaseURL()).Trace(aliasedURL), "Unable to reach %s to upload MinIO diagnostics report, please use --airgap to upload manually", subnetBaseURL())
+	alias, apiKey := initSubnetConnectivity(ctx, aliasedURL, true)
+	if len(apiKey) == 0 {
+		// api key not passed as flag. Check that the cluster is registered.
+		apiKey = validateClusterRegistered(alias, true)
 	}
-
-	e := validateFlags(uploadToSubnet)
-	fatalIf(probe.NewError(e), "unable to parse input values")
 
 	// Create a new MinIO Admin Client
 	client := getClient(aliasedURL)
 
 	// Main execution
-	execSupportDiag(ctx, client, alias, license, uploadToSubnet)
+	execSupportDiag(ctx, client, alias, apiKey)
 
 	return nil
 }
 
-func fetchSubnetUploadFlags(ctx *cli.Context) (string, bool) {
-	// license info to upload to subnet.
-	license := ctx.String("license")
-
-	// If set, the MinIO diagnostics will not be uploaded
-	// to subnet and will only be saved locally.
-	offline := ctx.Bool("airgap") || ctx.Bool("offline")
-
-	return license, offline
-}
-
-func validateFlags(uploadToSubnet bool) error {
-	if uploadToSubnet {
-		if globalJSON {
-			return errors.New("--json is applicable only when --airgap is also passed")
-		}
-		return nil
-	}
-
-	if globalDevMode {
-		return errors.New("--dev is not applicable in airgap mode")
-	}
-
-	return nil
-}
-
-func execSupportDiag(ctx *cli.Context, client *madmin.AdminClient, alias string, license string, uploadToSubnet bool) {
+func execSupportDiag(ctx *cli.Context, client *madmin.AdminClient, alias string, apiKey string) {
 	var reqURL string
 	var headers map[string]string
 
 	filename := fmt.Sprintf("%s-health_%s.json.gz", filepath.Clean(alias), UTCNow().Format("20060102150405"))
-	if uploadToSubnet {
+	if !globalAirgapped {
 		// Retrieve subnet credentials (login/license) beforehand as
 		// it can take a long time to fetch the health information
-		reqURL, headers = prepareDiagUploadURL(alias, filename, license)
+		uploadURL := subnetUploadURL("health", filename)
+		reqURL, headers = prepareSubnetUploadURL(uploadURL, alias, apiKey)
 	}
 
 	healthInfo, version, e := fetchServerDiagInfo(ctx, client)
@@ -229,100 +193,28 @@ func execSupportDiag(ctx *cli.Context, client *madmin.AdminClient, alias string,
 		switch version {
 		case madmin.HealthInfoVersion0:
 			printMsg(healthInfo.(madmin.HealthInfoV0))
+		case madmin.HealthInfoVersion2:
+			printMsg(healthInfo.(madmin.HealthInfoV2))
 		case madmin.HealthInfoVersion:
 			printMsg(healthInfo.(madmin.HealthInfo))
 		}
 		return
 	}
 
-	e = tarGZ(healthInfo, version, filename, !uploadToSubnet)
+	e = tarGZ(healthInfo, version, filename)
 	fatalIf(probe.NewError(e), "Unable to save MinIO diagnostics report")
 
-	if uploadToSubnet {
-		e = uploadDiagReport(alias, filename, reqURL, headers)
+	if !globalAirgapped {
+		resp, e := uploadFileToSubnet(alias, filename, reqURL, headers)
 		fatalIf(probe.NewError(e), "Unable to upload MinIO diagnostics report to SUBNET portal")
-	}
-}
 
-func prepareDiagUploadURL(alias string, filename string, license string) (string, map[string]string) {
-	apiKey := ""
-	if len(license) == 0 {
-		apiKey = getSubnetAPIKeyFromConfig(alias)
-
-		if len(apiKey) == 0 {
-			license = getSubnetLicenseFromConfig(alias)
-			if len(license) == 0 {
-				// Both api key and license not available. Ask user to register the cluster first
-				e := fmt.Errorf("Please register the cluster first by running 'mc support register %s', or use --airgap flag", alias)
-				fatalIf(probe.NewError(e), "Cluster not registered.")
-			}
+		msg := "MinIO diagnostics report was successfully uploaded to SUBNET."
+		clusterURL, _ := url.PathUnescape(gjson.Get(resp, "cluster_url").String())
+		if len(clusterURL) > 0 {
+			msg += fmt.Sprintf(" Please click here to view our analysis: %s", clusterURL)
 		}
+		console.Infoln(msg)
 	}
-
-	uploadURL := subnetHealthUploadURL()
-
-	reqURL, headers, e := subnetURLWithAuth(uploadURL, apiKey, license)
-	fatalIf(probe.NewError(e).Trace(uploadURL), "Unable to fetch SUBNET authentication")
-
-	reqURL = fmt.Sprintf("%s&filename=%s", reqURL, filename)
-	return reqURL, headers
-}
-
-func uploadDiagReport(alias string, filename string, reqURL string, headers map[string]string) error {
-	e := setSubnetProxyFromConfig(alias)
-	if e != nil {
-		return e
-	}
-
-	req, e := subnetUploadReq(reqURL, filename)
-	if e != nil {
-		return e
-	}
-
-	resp, e := subnetReqDo(req, headers)
-	if e != nil {
-		return e
-	}
-
-	extractAndSaveAPIKey(alias, resp)
-
-	// Delete the report after successful upload
-	os.Remove(filename)
-
-	msg := "MinIO diagnostics report was successfully uploaded to SUBNET."
-	clusterURL, _ := url.PathUnescape(gjson.Get(resp, "cluster_url").String())
-	if len(clusterURL) > 0 {
-		msg += fmt.Sprintf(" Please click here to view our analysis: %s", clusterURL)
-	}
-	console.Infoln(msg)
-	return nil
-}
-
-func subnetUploadReq(url string, filename string) (*http.Request, error) {
-	file, e := os.Open(filename)
-	if e != nil {
-		return nil, e
-	}
-	defer file.Close()
-
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	part, e := writer.CreateFormFile("file", filepath.Base(file.Name()))
-	if e != nil {
-		return nil, e
-	}
-	if _, e = io.Copy(part, file); e != nil {
-		return nil, e
-	}
-	writer.Close()
-
-	r, e := http.NewRequest(http.MethodPost, url, &body)
-	if e != nil {
-		return nil, e
-	}
-	r.Header.Add("Content-Type", writer.FormDataContentType())
-
-	return r, nil
 }
 
 func fetchServerDiagInfo(ctx *cli.Context, client *madmin.AdminClient) (interface{}, string, error) {
@@ -416,9 +308,6 @@ func fetchServerDiagInfo(ctx *cli.Context, client *madmin.AdminClient) (interfac
 	mem := spinner("Mem Info", madmin.HealthDataTypeSysMem)
 	process := spinner("Process Info", madmin.HealthDataTypeSysLoad)
 	config := spinner("Server Config", madmin.HealthDataTypeMinioConfig)
-	drive := spinner("Drive Test", madmin.HealthDataTypePerfDrive)
-	net := spinner("Network Test", madmin.HealthDataTypePerfNet)
-	obj := spinner("Objects Test", madmin.HealthDataTypePerfObj)
 	syserr := spinner("System Errors", madmin.HealthDataTypeSysErrors)
 	syssrv := spinner("System Services", madmin.HealthDataTypeSysServices)
 	sysconfig := spinner("System Config", madmin.HealthDataTypeSysConfig)
@@ -447,28 +336,23 @@ func fetchServerDiagInfo(ctx *cli.Context, client *madmin.AdminClient) (interfac
 	}
 
 	progress := func(info madmin.HealthInfo) {
-		noOfServers := len(info.Sys.CPUInfo)
 		_ = cpu(len(info.Sys.CPUInfo) > 0) &&
 			diskHw(len(info.Sys.Partitions) > 0) &&
 			osInfo(len(info.Sys.OSInfo) > 0) &&
 			mem(len(info.Sys.MemInfo) > 0) &&
 			process(len(info.Sys.ProcInfo) > 0) &&
 			config(info.Minio.Config.Config != nil) &&
-			drive(len(info.Perf.DrivePerf) > 0) &&
-			obj(len(info.Perf.ObjPerf) > 0) &&
-			net(noOfServers == 1 || len(info.Perf.NetPerf) > 0) &&
 			syserr(len(info.Sys.SysErrs) > 0) &&
 			syssrv(len(info.Sys.SysServices) > 0) &&
 			sysconfig(len(info.Sys.SysConfig) > 0) &&
 			admin(len(info.Minio.Info.Servers) > 0)
 	}
 
-	var err error
 	// Fetch info of all servers (cluster or single server)
-	resp, version, err := client.ServerHealthInfo(cont, *opts, ctx.Duration("deadline"))
-	if err != nil {
+	resp, version, e := client.ServerHealthInfo(cont, *opts, ctx.Duration("deadline"))
+	if e != nil {
 		cancel()
-		return nil, "", err
+		return nil, "", e
 	}
 
 	var healthInfo interface{}
@@ -478,9 +362,9 @@ func fetchServerDiagInfo(ctx *cli.Context, client *madmin.AdminClient) (interfac
 	case madmin.HealthInfoVersion0:
 		info := madmin.HealthInfoV0{}
 		for {
-			if err = decoder.Decode(&info); err != nil {
-				if errors.Is(err, io.EOF) {
-					err = nil
+			if e = decoder.Decode(&info); e != nil {
+				if errors.Is(e, io.EOF) {
+					e = nil
 				}
 
 				break
@@ -491,9 +375,9 @@ func fetchServerDiagInfo(ctx *cli.Context, client *madmin.AdminClient) (interfac
 
 		// Old minio versions don't return the MinIO info in
 		// response of the healthinfo api. So fetch it separately
-		minioInfo, err := client.ServerInfo(globalContext)
-		if err != nil {
-			info.Minio.Error = err.Error()
+		minioInfo, e := client.ServerInfo(globalContext)
+		if e != nil {
+			info.Minio.Error = e.Error()
 		} else {
 			info.Minio.Info = minioInfo
 		}
@@ -503,9 +387,9 @@ func fetchServerDiagInfo(ctx *cli.Context, client *madmin.AdminClient) (interfac
 	case madmin.HealthInfoVersion2:
 		info := madmin.HealthInfoV2{}
 		for {
-			if err = decoder.Decode(&info); err != nil {
-				if errors.Is(err, io.EOF) {
-					err = nil
+			if e = decoder.Decode(&info); e != nil {
+				if errors.Is(e, io.EOF) {
+					e = nil
 				}
 
 				break
@@ -517,9 +401,9 @@ func fetchServerDiagInfo(ctx *cli.Context, client *madmin.AdminClient) (interfac
 	case madmin.HealthInfoVersion:
 		info := madmin.HealthInfo{}
 		for {
-			if err = decoder.Decode(&info); err != nil {
-				if errors.Is(err, io.EOF) {
-					err = nil
+			if e = decoder.Decode(&info); e != nil {
+				if errors.Is(e, io.EOF) {
+					e = nil
 				}
 
 				break
@@ -530,9 +414,9 @@ func fetchServerDiagInfo(ctx *cli.Context, client *madmin.AdminClient) (interfac
 		healthInfo = info
 	}
 
-	// cancel the context if obdChan has returned.
+	// cancel the context if supportDiagChan has returned.
 	cancel()
-	return healthInfo, version, err
+	return healthInfo, version, e
 }
 
 // HealthDataTypeSlice is a typed list of health tests
@@ -541,8 +425,8 @@ type HealthDataTypeSlice []madmin.HealthDataType
 // Set - sets the flag to the given value
 func (d *HealthDataTypeSlice) Set(value string) error {
 	for _, v := range strings.Split(value, ",") {
-		if obdData, ok := madmin.HealthDataTypesMap[strings.Trim(v, " ")]; ok {
-			*d = append(*d, obdData)
+		if supportDiagData, ok := madmin.HealthDataTypesMap[strings.Trim(v, " ")]; ok {
+			*d = append(*d, supportDiagData)
 		} else {
 			return fmt.Errorf("valid options include %s", options.String())
 		}
@@ -553,14 +437,14 @@ func (d *HealthDataTypeSlice) Set(value string) error {
 // String - returns the string representation of the health datatypes
 func (d *HealthDataTypeSlice) String() string {
 	val := ""
-	for _, obdData := range *d {
+	for _, supportDiagData := range *d {
 		formatStr := "%s"
 		if val != "" {
 			formatStr = fmt.Sprintf("%s,%%s", formatStr)
 		} else {
 			formatStr = fmt.Sprintf("%s%%s", formatStr)
 		}
-		val = fmt.Sprintf(formatStr, val, string(obdData))
+		val = fmt.Sprintf(formatStr, val, string(supportDiagData))
 	}
 	return val
 }
@@ -626,8 +510,8 @@ func (f HealthDataTypeFlag) ApplyWithError(set *flag.FlagSet) error {
 				newVal := &HealthDataTypeSlice{}
 				for _, s := range strings.Split(envVal, ",") {
 					s = strings.TrimSpace(s)
-					if err := newVal.Set(s); err != nil {
-						return fmt.Errorf("could not parse %s as health datatype value for flag %s: %s", envVal, f.Name, err)
+					if e := newVal.Set(s); e != nil {
+						return fmt.Errorf("could not parse %s as health datatype value for flag %s: %s", envVal, f.Name, e)
 					}
 				}
 				f.Value = newVal

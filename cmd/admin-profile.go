@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -19,7 +19,6 @@ package cmd
 
 import (
 	"github.com/minio/cli"
-	"github.com/minio/pkg/console"
 )
 
 var adminProfileSubcommands = []cli.Command{
@@ -40,7 +39,7 @@ var adminProfileCmd = cli.Command{
 }
 
 // mainAdminProfile is the handle for "mc admin profile" command.
-func mainAdminProfile(ctx *cli.Context) error {
-	console.Infoln("Please use 'mc support profile'")
+func mainAdminProfile(_ *cli.Context) error {
+	deprecatedError("mc support profile")
 	return nil
 }

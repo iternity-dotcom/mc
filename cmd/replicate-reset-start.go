@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
+// Copyright (c) 2015-2022 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -29,7 +29,6 @@ import (
 	"github.com/minio/mc/pkg/probe"
 	"github.com/minio/minio-go/v7/pkg/replication"
 	"github.com/minio/pkg/console"
-	"maze.io/x/duration"
 )
 
 var replicateResyncStartFlags = []cli.Flag{
@@ -71,7 +70,7 @@ EXAMPLES:
 // checkReplicateResyncStartSyntax - validate all the passed arguments
 func checkReplicateResyncStartSyntax(ctx *cli.Context) {
 	if len(ctx.Args()) != 1 {
-		cli.ShowCommandHelpAndExit(ctx, "start", 1) // last argument is exit code
+		showCommandHelpAndExit(ctx, 1) // last argument is exit code
 	}
 	if ctx.String("remote-bucket") == "" {
 		fatal(errDummy().Trace(), "--remote-bucket flag needs to be specified.")
@@ -119,7 +118,7 @@ func mainReplicateResyncStart(cliCtx *cli.Context) error {
 	if cliCtx.IsSet("older-than") {
 		olderThanStr = cliCtx.String("older-than")
 		if olderThanStr != "" {
-			days, e := duration.ParseDuration(olderThanStr)
+			days, e := ParseDuration(olderThanStr)
 			if e != nil || !strings.ContainsAny(olderThanStr, "dwy") {
 				fatalIf(probe.NewError(e), "Unable to parse older-than=`"+olderThanStr+"`.")
 			}
@@ -133,7 +132,7 @@ func mainReplicateResyncStart(cliCtx *cli.Context) error {
 	rinfo, err := client.ResetReplication(ctx, olderThan, cliCtx.String("remote-bucket"))
 	fatalIf(err.Trace(args...), "Unable to reset replication")
 	printMsg(replicateResyncMessage{
-		Op:                "start",
+		Op:                cliCtx.Command.Name,
 		URL:               aliasedURL,
 		ResyncTargetsInfo: rinfo,
 	})
