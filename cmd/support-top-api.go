@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2022 MinIO, Inc.
+// Copyright (c) 2015-2023 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -22,7 +22,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/minio/cli"
-	"github.com/minio/madmin-go"
+	"github.com/minio/madmin-go/v3"
 	"github.com/minio/mc/pkg/probe"
 )
 
@@ -109,7 +109,7 @@ func mainSupportTopAPI(ctx *cli.Context) error {
 			if apiCallInfo.Err != nil {
 				fatalIf(probe.NewError(apiCallInfo.Err), "Unable to fetch top API events")
 			}
-			if matchTrace(mopts, apiCallInfo) {
+			if mopts.matches(apiCallInfo) {
 				p.Send(topAPIResult{
 					apiCallInfo: apiCallInfo,
 				})
@@ -120,7 +120,7 @@ func mainSupportTopAPI(ctx *cli.Context) error {
 		}
 	}()
 
-	if e := p.Start(); e != nil {
+	if _, e := p.Run(); e != nil {
 		cancel()
 		fatalIf(probe.NewError(e).Trace(aliasedURL), "Unable to fetch top API events")
 	}

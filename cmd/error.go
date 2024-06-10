@@ -27,7 +27,7 @@ import (
 	"github.com/minio/cli"
 	json "github.com/minio/colorjson"
 	"github.com/minio/mc/pkg/probe"
-	"github.com/minio/pkg/console"
+	"github.com/minio/pkg/v3/console"
 )
 
 // causeMessage container for golang error messages
@@ -84,11 +84,12 @@ func fatal(err *probe.Error, msg string, data ...interface{}) {
 	msg = fmt.Sprintf(msg, data...)
 	errmsg := err.String()
 	if !globalDebug {
-		e := err.ToGoError()
-		if errors.Is(e, context.Canceled) {
-			// This will replace context canceled error message
-			// that the user is seeing to a better one.
+		var e error
+		if errors.Is(globalContext.Err(), context.Canceled) {
+			// mc is getting killed
 			e = errors.New("Canceling upon user request")
+		} else {
+			e = err.ToGoError()
 		}
 		errmsg = e.Error()
 	}
@@ -159,14 +160,38 @@ func errorIf(err *probe.Error, msg string, data ...interface{}) {
 	}
 	msg = fmt.Sprintf(msg, data...)
 	if !globalDebug {
-		e := err.ToGoError()
-		if errors.Is(e, context.Canceled) {
-			// This will replace context canceled error message
-			// that the user is seeing to a better one.
+		var e error
+		if errors.Is(globalContext.Err(), context.Canceled) {
+			// mc is getting killed
 			e = errors.New("Canceling upon user request")
+		} else {
+			e = err.ToGoError()
 		}
 		console.Errorln(fmt.Sprintf("%s %s", msg, e))
 		return
 	}
 	console.Errorln(fmt.Sprintf("%s %s", msg, err))
+}
+
+// deprecatedError function for deprecated commands
+func deprecatedError(newCommandName string) {
+	err := probe.NewError(fmt.Errorf("Please use '%s' instead", newCommandName))
+	fatal(err, "Deprecated command")
+}
+
+// deprecatedError function for deprecated flags
+func deprecatedFlagError(oldFlag, newFlag string) {
+	err := probe.NewError(fmt.Errorf("'%s' has been deprecated, please use %s instead", oldFlag, newFlag))
+	fatal(err, "a deprecated Flag")
+}
+
+func deprecatedFlagsWarning(cliCtx *cli.Context) {
+	for _, v := range cliCtx.Args() {
+		switch v {
+		case "--encrypt", "-encrypt":
+			deprecatedFlagError("--encrypt", "--enc-s3 or --enc-kms")
+		case "--encrypt-key", "-encrypt-key":
+			deprecatedFlagError("--encrypt-key", "--enc-c")
+		}
+	}
 }

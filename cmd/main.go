@@ -33,15 +33,15 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cheggaaa/pb"
 	"github.com/inconshreveable/mousetrap"
 	"github.com/minio/cli"
 	"github.com/minio/mc/pkg/probe"
 	"github.com/minio/minio-go/v7/pkg/set"
-	"github.com/minio/pkg/console"
-	"github.com/minio/pkg/env"
-	"github.com/minio/pkg/trie"
-	"github.com/minio/pkg/words"
+	"github.com/minio/pkg/v3/console"
+	"github.com/minio/pkg/v3/env"
+	"github.com/minio/pkg/v3/trie"
+	"github.com/minio/pkg/v3/words"
+	"golang.org/x/term"
 
 	completeinstall "github.com/posener/complete/cmd/install"
 )
@@ -116,11 +116,11 @@ func Main(args []string) error {
 	probe.SetAppInfo("Commit", ShortCommitID)
 
 	// Fetch terminal size, if not available, automatically
-	// set globalQuiet to true.
-	if w, e := pb.GetTerminalWidth(); e != nil {
-		globalQuiet = true
+	// set globalQuiet to true on non-window.
+	if w, h, e := term.GetSize(int(os.Stdout.Fd())); e != nil {
+		globalQuiet = runtime.GOOS != "windows"
 	} else {
-		globalTermWidth = w
+		globalTermWidth, globalTermHeight = w, h
 	}
 
 	// Set the mc app name.
@@ -137,6 +137,7 @@ func Main(args []string) error {
 	// Wait until the user quits the pager
 	defer globalHelpPager.WaitForExit()
 
+	parsePagerDisableFlag(args)
 	// Run the app
 	return registerApp(appName).Run(args)
 }
@@ -161,7 +162,7 @@ func visibleFlags(fl []cli.Flag) []cli.Flag {
 }
 
 // Function invoked when invalid flag is passed
-func onUsageError(ctx *cli.Context, err error, subcommand bool) error {
+func onUsageError(ctx *cli.Context, err error, _ bool) error {
 	type subCommandHelp struct {
 		flagName string
 		usage    string
@@ -255,9 +256,6 @@ func migrate() {
 	// Migrate config files if any.
 	migrateConfig()
 
-	// Migrate session files if any.
-	migrateSession()
-
 	// Migrate shared urls if any.
 	migrateShare()
 }
@@ -272,11 +270,6 @@ func initMC() {
 		if !globalQuiet && !globalJSON {
 			console.Infoln("Configuration written to `" + mustGetMcConfigPath() + "`. Please update your access credentials.")
 		}
-	}
-
-	// Check if mc session directory exists.
-	if !isSessionDirExists() {
-		fatalIf(createSessionDir().Trace(), "Unable to create session config directory.")
 	}
 
 	// Check if mc share directory exists.
@@ -335,10 +328,10 @@ func installAutoCompletion() {
 				"Supported shells are: bash, zsh, fish")
 	}
 
-	err := completeinstall.Install(filepath.Base(os.Args[0]))
+	e := completeinstall.Install(filepath.Base(os.Args[0]))
 	var printMsg string
-	if err != nil && strings.Contains(err.Error(), "* already installed") {
-		errStr := err.Error()[strings.Index(err.Error(), "\n")+1:]
+	if e != nil && strings.Contains(e.Error(), "* already installed") {
+		errStr := e.Error()[strings.Index(e.Error(), "\n")+1:]
 		re := regexp.MustCompile(`[::space::]*\*.*` + shellName + `.*`)
 		relatedMsg := re.FindStringSubmatch(errStr)
 		if len(relatedMsg) > 0 {
@@ -351,7 +344,7 @@ func installAutoCompletion() {
 		if completeinstall.IsInstalled(filepath.Base(os.Args[0])) || completeinstall.IsInstalled("mc") {
 			console.Infoln("autocompletion is enabled.", printMsg)
 		} else {
-			fatalIf(probe.NewError(err), "Unable to install auto-completion.")
+			fatalIf(probe.NewError(e), "Unable to install auto-completion.")
 		}
 	} else {
 		console.Infoln("enabled autocompletion in your '" + shellName + "' rc file. Please restart your shell.")
@@ -359,6 +352,8 @@ func installAutoCompletion() {
 }
 
 func registerBefore(ctx *cli.Context) error {
+	deprecatedFlagsWarning(ctx)
+
 	if ctx.IsSet("config-dir") {
 		// Set the config directory.
 		setMcConfigDir(ctx.String("config-dir"))
@@ -420,44 +415,48 @@ func checkUpdate(ctx *cli.Context) {
 
 var appCmds = []cli.Command{
 	aliasCmd,
-	lsCmd,
-	mbCmd,
-	rbCmd,
+	adminCmd,
+	anonymousCmd,
+	batchCmd,
 	cpCmd,
-	mvCmd,
-	rmCmd,
-	mirrorCmd,
 	catCmd,
-	headCmd,
-	pipeCmd,
-	findCmd,
-	sqlCmd,
-	statCmd,
-	treeCmd,
+	configCmd,
+	diffCmd,
 	duCmd,
-	retentionCmd,
-	legalHoldCmd,
-	supportCmd,
-	licenseCmd,
-	shareCmd,
-	versionCmd,
-	ilmCmd,
 	encryptCmd,
 	eventCmd,
-	watchCmd,
-	undoCmd,
-	anonymousCmd,
-	policyCmd,
-	tagCmd,
-	diffCmd,
-	replicateCmd,
-	adminCmd,
-	configCmd,
-	updateCmd,
-	readyCmd,
-	pingCmd,
+	findCmd,
+	getCmd,
+	headCmd,
+	ilmCmd,
+	idpCmd,
+	licenseCmd,
+	legalHoldCmd,
+	lsCmd,
+	mbCmd,
+	mvCmd,
+	mirrorCmd,
 	odCmd,
-	batchCmd,
+	pingCmd,
+	policyCmd,
+	pipeCmd,
+	putCmd,
+	quotaCmd,
+	rmCmd,
+	retentionCmd,
+	rbCmd,
+	replicateCmd,
+	readyCmd,
+	sqlCmd,
+	statCmd,
+	supportCmd,
+	shareCmd,
+	treeCmd,
+	tagCmd,
+	undoCmd,
+	updateCmd,
+	versionCmd,
+	watchCmd,
 }
 
 func printMCVersion(c *cli.Context) {
@@ -508,8 +507,11 @@ func registerApp(name string) *cli.App {
 	app.CustomAppHelpTemplate = mcHelpTemplate
 	app.EnableBashCompletion = true
 	app.OnUsageError = onUsageError
-	if isTerminal() {
+
+	if isTerminal() && !globalPagerDisabled {
 		app.HelpWriter = globalHelpPager
+	} else {
+		app.HelpWriter = os.Stdout
 	}
 
 	return app

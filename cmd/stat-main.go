@@ -24,7 +24,7 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/minio/cli"
-	"github.com/minio/pkg/console"
+	"github.com/minio/pkg/v3/console"
 )
 
 // stat specific flags.
@@ -56,7 +56,7 @@ var statCmd = cli.Command{
 	Action:       mainStat,
 	OnUsageError: onUsageError,
 	Before:       setGlobalsFromContext,
-	Flags:        append(append(statFlags, ioFlags...), globalFlags...),
+	Flags:        append(append(statFlags, encCFlag), globalFlags...),
 	CustomHelpTemplate: `NAME:
   {{.HelpName}} - {{.Usage}}
 
@@ -66,8 +66,6 @@ USAGE:
 FLAGS:
   {{range .VisibleFlags}}{{.}}
   {{end}}
-ENVIRONMENT VARIABLES:
-  MC_ENCRYPT_KEY:  list of comma delimited prefix=secret values
 
 EXAMPLES:
   1. Stat all contents of mybucket on Amazon S3 cloud storage.
@@ -79,17 +77,14 @@ EXAMPLES:
   3. Stat files recursively on a local filesystem on Microsoft Windows.
      {{.Prompt}} {{.HelpName}} --recursive C:\Users\mydocuments\
 
-  4. Stat encrypted files on Amazon S3 cloud storage.
-     {{.Prompt}} {{.HelpName}} --encrypt-key "s3/personal-docs/=32byteslongsecretkeymustbegiven1" s3/personal-docs/2018-account_report.docx
-
-  5. Stat encrypted files on Amazon S3 cloud storage. In case the encryption key contains non-printable character like tab, pass the
+  4. Stat encrypted files on Amazon S3 cloud storage. In case the encryption key contains non-printable character like tab, pass the
      base64 encoded string as key.
-     {{.Prompt}} {{.HelpName}} --encrypt-key "s3/personal-document/=MzJieXRlc2xvbmdzZWNyZWFiY2RlZmcJZ2l2ZW5uMjE=" s3/personal-document/2019-account_report.docx
+     {{.Prompt}} {{.HelpName}} --enc-c "s3/personal-document/=MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDA" s3/personal-document/2019-account_report.docx
 
-  6. Stat a specific object version.
+  5. Stat a specific object version.
      {{.Prompt}} {{.HelpName}} --version-id "CL3sWgdSN2pNntSf6UnZAuh2kcu8E8si" s3/personal-docs/2018-account_report.docx
 
-  7. Stat all objects versions recursively created before 1st January 2020.
+  6. Stat all objects versions recursively created before 1st January 2020.
      {{.Prompt}} {{.HelpName}} --versions --rewind 2020.01.01T00:00 s3/personal-docs/
 `,
 }
@@ -124,7 +119,7 @@ func parseAndCheckStatSyntax(ctx context.Context, cliCtx *cli.Context, encKeyDB 
 	}
 
 	for _, url := range URLs {
-		_, _, err := url2Stat(ctx, url, versionID, false, encKeyDB, rewind, false)
+		_, _, err := url2Stat(ctx, url2StatOptions{urlStr: url, versionID: versionID, fileAttr: false, encKeyDB: encKeyDB, timeRef: rewind, isZip: false, ignoreBucketExistsCheck: false})
 		if err != nil {
 			fatalIf(err.Trace(url), "Unable to stat `"+url+"`.")
 		}
@@ -150,8 +145,11 @@ func mainStat(cliCtx *cli.Context) error {
 	console.SetColor("Unset", color.New(color.FgRed))
 	console.SetColor("Set", color.New(color.FgGreen))
 
+	console.SetColor("Title", color.New(color.Bold, color.FgBlue))
+	console.SetColor("Count", color.New(color.FgGreen))
+
 	// Parse encryption keys per command.
-	encKeyDB, err := getEncKeys(cliCtx)
+	encKeyDB, err := validateAndCreateEncryptionKeys(cliCtx)
 	fatalIf(err, "Unable to parse encryption keys.")
 
 	// check 'stat' cli arguments.

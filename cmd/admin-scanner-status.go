@@ -18,10 +18,13 @@
 package cmd
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -32,9 +35,9 @@ import (
 	"github.com/fatih/color"
 	"github.com/minio/cli"
 	json "github.com/minio/colorjson"
-	"github.com/minio/madmin-go"
+	"github.com/minio/madmin-go/v3"
 	"github.com/minio/mc/pkg/probe"
-	"github.com/minio/pkg/console"
+	"github.com/minio/pkg/v3/console"
 	"github.com/olekukonko/tablewriter"
 )
 
@@ -58,11 +61,17 @@ var adminScannerInfoFlags = []cli.Flag{
 		Usage: "maximum number of active paths to show. -1 for unlimited",
 		Value: -1,
 	},
+	cli.StringFlag{
+		Name:   "in",
+		Hidden: true,
+		Usage:  "read previously saved json from file and replay",
+	},
 }
 
 var adminScannerInfo = cli.Command{
 	Name:            "status",
 	Aliases:         []string{"info"},
+	HiddenAliases:   true,
 	Usage:           "summarize scanner events on MinIO server in real-time",
 	Action:          mainAdminScannerInfo,
 	OnUsageError:    onUsageError,
@@ -86,6 +95,9 @@ EXAMPLES:
 
 // checkAdminTopAPISyntax - validate all the passed arguments
 func checkAdminScannerInfoSyntax(ctx *cli.Context) {
+	if ctx.String("in") != "" {
+		return
+	}
 	if len(ctx.Args()) == 0 || len(ctx.Args()) > 1 {
 		showCommandHelpAndExit(ctx, 1) // last argument is exit code
 	}
@@ -96,12 +108,48 @@ func mainAdminScannerInfo(ctx *cli.Context) error {
 
 	aliasedURL := ctx.Args().Get(0)
 
+	ui := tea.NewProgram(initScannerMetricsUI(ctx.Int("max-paths")))
+	ctxt, cancel := context.WithCancel(globalContext)
+	defer cancel()
+
+	// Replay from file
+	if inFile := ctx.String("in"); inFile != "" {
+		go func() {
+			if _, e := ui.Run(); e != nil {
+				cancel()
+				fatalIf(probe.NewError(e).Trace(aliasedURL), "Unable to fetch scanner metrics")
+			}
+		}()
+		f, e := os.Open(inFile)
+		fatalIf(probe.NewError(e).Trace(aliasedURL), "Unable to open input")
+		sc := bufio.NewReader(f)
+		var lastTime time.Time
+		for {
+			b, e := sc.ReadBytes('\n')
+			if e == io.EOF {
+				break
+			}
+			var metrics madmin.RealtimeMetrics
+			e = json.Unmarshal(b, &metrics)
+			if e != nil || metrics.Aggregated.Scanner == nil {
+				continue
+			}
+			delay := metrics.Aggregated.Scanner.CollectedAt.Sub(lastTime)
+			if !lastTime.IsZero() && delay > 0 {
+				if delay > 3*time.Second {
+					delay = 3 * time.Second
+				}
+				time.Sleep(delay)
+			}
+			ui.Send(metrics)
+			lastTime = metrics.Aggregated.Scanner.CollectedAt
+		}
+		os.Exit(0)
+	}
+
 	// Create a new MinIO Admin Client
 	client, err := newAdminClient(aliasedURL)
 	fatalIf(err.Trace(aliasedURL), "Unable to initialize admin client.")
-
-	ctxt, cancel := context.WithCancel(globalContext)
-	defer cancel()
 
 	opts := madmin.MetricsOptions{
 		Type:     madmin.MetricsScanner,
@@ -110,7 +158,6 @@ func mainAdminScannerInfo(ctx *cli.Context) error {
 		Hosts:    strings.Split(ctx.String("nodes"), ","),
 		ByHost:   false,
 	}
-	ui := tea.NewProgram(initScannerMetricsUI(ctx.Int("max-paths")))
 	if globalJSON {
 		e := client.Metrics(ctxt, opts, func(metrics madmin.RealtimeMetrics) {
 			printMsg(metricsMessage{RealtimeMetrics: metrics})
@@ -132,7 +179,7 @@ func mainAdminScannerInfo(ctx *cli.Context) error {
 		}
 	}()
 
-	if e := ui.Start(); e != nil {
+	if _, e := ui.Run(); e != nil {
 		cancel()
 		fatalIf(probe.NewError(e).Trace(aliasedURL), "Unable to fetch scanner metrics")
 	}
@@ -207,11 +254,13 @@ func (m *scannerMetricsUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		return m, nil
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
 	}
 
-	var cmd tea.Cmd
-	m.spinner, cmd = m.spinner.Update(msg)
-	return m, cmd
+	return m, nil
 }
 
 func (m *scannerMetricsUI) View() string {
@@ -221,21 +270,33 @@ func (m *scannerMetricsUI) View() string {
 		s.WriteString(fmt.Sprintf("%s %s\n", console.Colorize("metrics-top-title", "Scanner Activity:"), m.spinner.View()))
 	}
 
-	// Set table header
+	// Set table header - akin to k8s style
+	// https://github.com/olekukonko/tablewriter#example-10---set-nowhitespace-and-tablepadding-option
 	table := tablewriter.NewWriter(&s)
 	table.SetAutoWrapText(false)
+	table.SetAutoFormatHeaders(true)
 	table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
 	table.SetAlignment(tablewriter.ALIGN_LEFT)
-	table.SetBorder(true)
-	table.SetRowLine(false)
+	table.SetCenterSeparator("")
+	table.SetColumnSeparator("")
+	table.SetRowSeparator("")
+	table.SetHeaderLine(false)
+	table.SetBorder(false)
+	table.SetTablePadding("\t") // pad with tabs
+	table.SetNoWhiteSpace(true)
+
+	writtenRows := 0
 	addRow := func(s string) {
 		table.Append([]string{s})
+		writtenRows++
 	}
 	_ = addRow
 	addRowF := func(format string, vals ...interface{}) {
 		s := fmt.Sprintf(format, vals...)
 		table.Append([]string{s})
+		writtenRows++
 	}
+
 	sc := m.current.Aggregated.Scanner
 	if sc == nil {
 		s.WriteString("(waiting for data)")
@@ -245,9 +306,12 @@ func (m *scannerMetricsUI) View() string {
 	title := metricsTitle
 	ui := metricsUint64
 	const wantCycles = 16
+	addRow("")
 	if len(sc.CyclesCompletedAt) < 2 {
-		addRow("Scan time:             Unknown (not enough data)")
+		addRow("Last full scan time:             Unknown (not enough data)")
 	} else {
+		addRow("Overall Statistics")
+		addRow("------------------")
 		sort.Slice(sc.CyclesCompletedAt, func(i, j int) bool {
 			return sc.CyclesCompletedAt[i].After(sc.CyclesCompletedAt[j])
 		})
@@ -267,31 +331,31 @@ func (m *scannerMetricsUI) View() string {
 	}
 	if sc.CurrentCycle > 0 {
 		addRowF(title("Current cycle:")+"         %s; Started: %v", ui(sc.CurrentCycle), console.Colorize("metrics-date", sc.CurrentStarted))
-		addRowF(title("Active drives:")+"          %s", ui(uint64(len(sc.ActivePaths))))
+		addRowF(title("Active drives:")+"         %s", ui(uint64(len(sc.ActivePaths))))
 	} else {
 		addRowF(title("Current cycle:") + "         (between cycles)")
-		addRowF(title("Active drives:")+"          %s", ui(uint64(len(sc.ActivePaths))))
+		addRowF(title("Active drives:")+"         %s", ui(uint64(len(sc.ActivePaths))))
 	}
-	addRow("-------------------------------------- Last Minute Statistics ---------------------------------------")
+	getRate := func(x madmin.TimedAction) string {
+		if x.AccTime > 0 {
+			return fmt.Sprintf("; Rate: %v/day", ui(uint64(float64(24*time.Hour)/(float64(time.Minute)/float64(x.Count)))))
+		}
+		return ""
+	}
+	addRow("")
+	addRow("Last Minute Statistics")
+	addRow("----------------------")
 	objs := uint64(0)
 	x := sc.LastMinute.Actions["ScanObject"]
 	{
 		avg := x.Avg()
-		rate := ""
-		if x.AccTime > 0 {
-			rate = fmt.Sprintf("; Rate: %v/day", ui(uint64(float64(24*time.Hour)/(float64(time.Minute)/float64(x.Count)))))
-		}
-		addRowF(title("Objects Scanned:")+"       %s objects; Avg: %v%s", ui(x.Count), metricsDuration(avg), rate)
+		addRowF(title("Objects Scanned:")+"       %s objects; Avg: %v%s", ui(x.Count), metricsDuration(avg), getRate(x))
 		objs = x.Count
 	}
 	x = sc.LastMinute.Actions["ApplyVersion"]
 	{
 		avg := x.Avg()
-		rate := ""
-		if x.AccTime > 0 {
-			rate = fmt.Sprintf("; Rate: %s/day", ui(uint64(float64(24*time.Hour)/(float64(time.Minute)/float64(x.Count)))))
-		}
-		addRowF(title("Versions Scanned:")+"      %s versions; Avg: %v%s", ui(x.Count), metricsDuration(avg), rate)
+		addRowF(title("Versions Scanned:")+"      %s versions; Avg: %v%s", ui(x.Count), metricsDuration(avg), getRate(x))
 	}
 	x = sc.LastMinute.Actions["HealCheck"]
 	{
@@ -314,6 +378,15 @@ func (m *scannerMetricsUI) View() string {
 	}
 	x = sc.LastMinute.Actions["CheckMissing"]
 	addRowF(title("Verify Deleted:")+"        %s folders; Avg: %v", ui(x.Count), metricsDuration(x.Avg()))
+	x = sc.LastMinute.Actions["HealAbandonedObject"]
+	if x.Count > 0 {
+		addRowF(title(" Missing Objects:")+"      %s objects healed; Avg: %v%s", ui(x.Count), metricsDuration(x.Avg()), getRate(x))
+	}
+	x = sc.LastMinute.Actions["HealAbandonedVersion"]
+	if x.Count > 0 {
+		addRowF(title(" Missing Versions:")+"     %s versions healed; Avg: %v%s; %v bytes/v", ui(x.Count), metricsDuration(x.Avg()), getRate(x), ui(x.AvgBytes()))
+	}
+
 	for k, x := range sc.LastMinute.ILM {
 		const length = 17
 		k += ":"
@@ -330,12 +403,25 @@ func (m *scannerMetricsUI) View() string {
 		}
 		addRowF(title("Yield:")+"                 %v total; Avg: %s", metricsDuration(time.Duration(x.AccTime)), avg)
 	}
+	if errs := m.current.Errors; len(errs) > 0 {
+		addRow("------------------------------------------- Errors --------------------------------------------------")
+		for _, s := range errs {
+			addRow(console.Colorize("metrics-error", s))
+		}
+	}
 
 	if m.maxPaths != 0 && len(sc.ActivePaths) > 0 {
 		addRow("------------------------------------- Currently Scanning Paths --------------------------------------")
-		const length = 100
+		length := 100
+		if globalTermWidth > 5 {
+			length = globalTermWidth
+		}
 		for i, s := range sc.ActivePaths {
 			if i == m.maxPaths {
+				break
+			}
+			if globalTermHeight > 5 && writtenRows >= globalTermHeight-5 {
+				addRow(console.Colorize("metrics-path", fmt.Sprintf("( ... hiding %d more disk(s) .. )", len(sc.ActivePaths)-i)))
 				break
 			}
 			if len(s) > length {
@@ -343,12 +429,6 @@ func (m *scannerMetricsUI) View() string {
 			}
 			s = strings.ReplaceAll(s, "\\", "/")
 			addRow(console.Colorize("metrics-path", s))
-		}
-	}
-	if errs := m.current.Errors; len(errs) > 0 {
-		addRow("------------------------------------------- Errors --------------------------------------------------")
-		for _, s := range errs {
-			addRow(console.Colorize("metrics-error", s))
 		}
 	}
 	table.Render()

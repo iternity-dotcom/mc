@@ -27,7 +27,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/minio/cli"
 	"github.com/minio/mc/pkg/probe"
-	"github.com/minio/pkg/console"
+	"github.com/minio/pkg/v3/console"
 )
 
 var adminRebalanceStatusCmd = cli.Command{
@@ -88,7 +88,7 @@ func mainAdminRebalanceStatus(ctx *cli.Context) error {
 	)
 	row := make([]string, len(rInfo.Pools))
 	for idx, pool := range rInfo.Pools {
-		statusStr := fmt.Sprintf("%.2f%%", pool.Used)
+		statusStr := fmt.Sprintf("%.2f%%", pool.Used*100)
 		if pool.Status == "Started" {
 			statusStr += " *" // indicating rebalance is in progress in this pool
 		}
@@ -119,7 +119,7 @@ func mainAdminRebalanceStatus(ctx *cli.Context) error {
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "Summary: \n")
-	fmt.Fprintf(&b, "Data: %s (%d objects, %d versions) \n", humanize.Bytes(totalBytes), totalObjects, totalVersions)
+	fmt.Fprintf(&b, "Data: %s (%d objects, %d versions) \n", humanize.IBytes(totalBytes), totalObjects, totalVersions)
 	fmt.Fprintf(&b, "Time: %s (%s to completion)", maxElapsed, maxETA)
 	console.Println(b.String())
 	return nil

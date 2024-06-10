@@ -25,13 +25,14 @@ import (
 	"github.com/minio/cli"
 	json "github.com/minio/colorjson"
 	"github.com/minio/mc/pkg/probe"
-	"github.com/minio/pkg/console"
+	"github.com/minio/pkg/v3/console"
 )
 
 var eventListFlags = []cli.Flag{}
 
 var eventListCmd = cli.Command{
 	Name:         "list",
+	ShortName:    "ls",
 	Usage:        "list bucket notifications",
 	Action:       mainEventList,
 	OnUsageError: onUsageError,

@@ -28,7 +28,7 @@ import (
 	"github.com/dustin/go-humanize"
 	json "github.com/minio/colorjson"
 	"github.com/minio/mc/pkg/probe"
-	"github.com/minio/pkg/console"
+	"github.com/minio/pkg/v3/console"
 )
 
 // printDate - human friendly formatted date.
@@ -51,6 +51,9 @@ type contentMessage struct {
 	VersionIndex   int    `json:"versionIndex,omitempty"`
 	IsDeleteMarker bool   `json:"isDeleteMarker,omitempty"`
 	StorageClass   string `json:"storageClass,omitempty"`
+
+	Metadata map[string]string `json:"metadata,omitempty"`
+	Tags     map[string]string `json:"tags,omitempty"`
 }
 
 // String colorized string message.
@@ -137,6 +140,9 @@ func generateContentMessages(clntURL ClientURL, ctnts []*ClientContent, printAll
 
 		contentMsg.Size = c.Size
 		contentMsg.StorageClass = c.StorageClass
+		contentMsg.Metadata = c.Metadata
+		contentMsg.Tags = c.Tags
+
 		md5sum := strings.TrimPrefix(c.ETag, "\"")
 		md5sum = strings.TrimSuffix(md5sum, "\"")
 		contentMsg.ETag = md5sum
@@ -192,7 +198,7 @@ func (s summaryMessage) JSON() string {
 }
 
 // Pretty print the list of versions belonging to one object
-func printObjectVersions(clntURL ClientURL, ctntVersions []*ClientContent, printAllVersions, isSummary bool) {
+func printObjectVersions(clntURL ClientURL, ctntVersions []*ClientContent, printAllVersions bool) {
 	sortObjectVersions(ctntVersions)
 	msgs := generateContentMessages(clntURL, ctntVersions, printAllVersions)
 	for _, msg := range msgs {
@@ -241,7 +247,7 @@ func doList(ctx context.Context, clnt Client, o doListOptions) error {
 
 		if lastPath != content.URL.Path {
 			// Print any object in the current list before reinitializing it
-			printObjectVersions(clnt.GetURL(), perObjectVersions, o.withOlderVersions, o.isSummary)
+			printObjectVersions(clnt.GetURL(), perObjectVersions, o.withOlderVersions)
 			lastPath = content.URL.Path
 			perObjectVersions = []*ClientContent{}
 		}
@@ -251,7 +257,7 @@ func doList(ctx context.Context, clnt Client, o doListOptions) error {
 		totalObjects++
 	}
 
-	printObjectVersions(clnt.GetURL(), perObjectVersions, o.withOlderVersions, o.isSummary)
+	printObjectVersions(clnt.GetURL(), perObjectVersions, o.withOlderVersions)
 
 	if o.isSummary {
 		printMsg(summaryMessage{

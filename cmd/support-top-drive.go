@@ -23,7 +23,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/minio/cli"
-	"github.com/minio/madmin-go"
+	"github.com/minio/madmin-go/v3"
 	"github.com/minio/mc/pkg/probe"
 )
 
@@ -38,6 +38,7 @@ var supportTopDriveFlags = []cli.Flag{
 var supportTopDriveCmd = cli.Command{
 	Name:            "drive",
 	Aliases:         []string{"disk"},
+	HiddenAliases:   true,
 	Usage:           "show real-time drive metrics",
 	Action:          mainSupportTopDrive,
 	OnUsageError:    onUsageError,
@@ -96,6 +97,7 @@ func mainSupportTopDrive(ctx *cli.Context) error {
 		Type:     madmin.MetricsDisk,
 		Interval: time.Second,
 		ByDisk:   true,
+		N:        ctx.Int("count"),
 	}
 
 	p := tea.NewProgram(initTopDriveUI(disks, ctx.Int("count")))
@@ -113,9 +115,10 @@ func mainSupportTopDrive(ctx *cli.Context) error {
 		if e != nil {
 			fatalIf(probe.NewError(e), "Unable to fetch top drives events")
 		}
+		p.Quit()
 	}()
 
-	if e := p.Start(); e != nil {
+	if _, e := p.Run(); e != nil {
 		cancel()
 		fatalIf(probe.NewError(e).Trace(aliasedURL), "Unable to fetch top drive events")
 	}

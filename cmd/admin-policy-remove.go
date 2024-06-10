@@ -21,12 +21,13 @@ import (
 	"github.com/fatih/color"
 	"github.com/minio/cli"
 	"github.com/minio/mc/pkg/probe"
-	"github.com/minio/pkg/console"
+	"github.com/minio/pkg/v3/console"
 )
 
 var adminPolicyRemoveCmd = cli.Command{
 	Name:         "remove",
-	Usage:        "remove policy",
+	ShortName:    "rm",
+	Usage:        "remove an IAM policy",
 	Action:       mainAdminPolicyRemove,
 	OnUsageError: onUsageError,
 	Before:       setGlobalsFromContext,

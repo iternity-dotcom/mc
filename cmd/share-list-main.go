@@ -30,6 +30,7 @@ var shareListFlags = []cli.Flag{}
 // Share documents via URL.
 var shareList = cli.Command{
 	Name:         "list",
+	ShortName:    "ls",
 	Usage:        "list previously shared objects",
 	Action:       mainShareList,
 	OnUsageError: onUsageError,
@@ -91,7 +92,7 @@ func doShareList(cmd string) *probe.Error {
 
 	// Print previously shared entries.
 	for shareURL, share := range shareDB.Shares {
-		printMsg(shareMesssage{
+		printMsg(shareMessage{
 			ObjectURL:   share.URL,
 			ShareURL:    shareURL,
 			TimeLeft:    share.Expiry - time.Since(share.Date),

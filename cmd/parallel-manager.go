@@ -18,7 +18,7 @@
 package cmd
 
 import (
-	"io/ioutil"
+	"os"
 	"runtime"
 	"strconv"
 	"sync"
@@ -26,7 +26,7 @@ import (
 	"time"
 
 	"github.com/minio/minio-go/v7"
-	mem "github.com/shirou/gopsutil/v3/mem"
+	"github.com/shirou/gopsutil/v3/mem"
 )
 
 const (
@@ -195,7 +195,10 @@ func (p *ParallelManager) enoughMemForUpload(uploadSize int64) bool {
 	}
 
 	smem := runtime.MemStats{}
-	runtime.GC()
+	if uploadSize > 50<<20 {
+		// GC if upload is bigger than 50MB.
+		runtime.GC()
+	}
 	runtime.ReadMemStats(&smem)
 
 	return estimateNeededMemoryForUpload(uploadSize)+smem.Alloc < p.maxMem
@@ -225,19 +228,19 @@ func (p *ParallelManager) stopAndWait() {
 const cgroupLimitFile = "/sys/fs/cgroup/memory/memory.limit_in_bytes"
 
 func cgroupLimit(limitFile string) (limit uint64) {
-	buf, err := ioutil.ReadFile(limitFile)
-	if err != nil {
+	buf, e := os.ReadFile(limitFile)
+	if e != nil {
 		return 9223372036854771712
 	}
-	limit, err = strconv.ParseUint(string(buf), 10, 64)
-	if err != nil {
+	limit, e = strconv.ParseUint(string(buf), 10, 64)
+	if e != nil {
 		return 9223372036854771712
 	}
 	return limit
 }
 
 func availableMemory() (available uint64) {
-	available = 8 << 30 // Default to 8 GiB when we can't find the limits.
+	available = 4 << 30 // Default to 4 GiB when we can't find the limits.
 
 	if runtime.GOOS == "linux" {
 		available = cgroupLimit(cgroupLimitFile)
@@ -252,12 +255,13 @@ func availableMemory() (available uint64) {
 
 	} // for all other platforms limits are based on virtual memory.
 
-	memStats, err := mem.VirtualMemory()
-	if err != nil {
-		return
+	memStats, _ := mem.VirtualMemory()
+	if memStats.Available > 0 {
+		available = memStats.Available
 	}
 
-	available = memStats.Available / 2
+	// Always use 50% of available memory.
+	available = available / 2
 	return
 }
 

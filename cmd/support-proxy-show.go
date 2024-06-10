@@ -19,7 +19,7 @@ package cmd
 
 import (
 	"github.com/minio/cli"
-	"github.com/minio/pkg/console"
+	"github.com/minio/pkg/v3/console"
 )
 
 var supportProxyShowCmd = cli.Command{
@@ -28,7 +28,7 @@ var supportProxyShowCmd = cli.Command{
 	Action:          mainSupportProxyShow,
 	OnUsageError:    onUsageError,
 	Before:          setGlobalsFromContext,
-	Flags:           supportGlobalFlags,
+	Flags:           globalFlags,
 	HideHelpCommand: true,
 	CustomHelpTemplate: `NAME:
   {{.HelpName}} - {{.Usage}}
@@ -81,6 +81,8 @@ func mainSupportProxyShow(ctx *cli.Context) error {
 	args := ctx.Args()
 	aliasedURL := args.Get(0)
 	alias, _ := url2Alias(aliasedURL)
+
+	validateClusterRegistered(alias, false)
 
 	// Main execution
 	// get the subnet proxy config from MinIO if available

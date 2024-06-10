@@ -28,7 +28,7 @@ import (
 	json "github.com/minio/colorjson"
 	"github.com/minio/mc/pkg/probe"
 	"github.com/minio/minio-go/v7"
-	"github.com/minio/pkg/console"
+	"github.com/minio/pkg/v3/console"
 )
 
 var retentionInfoFlags = []cli.Flag{
@@ -217,9 +217,9 @@ func (m retentionInfoMessageRecord) String() string {
 
 	fmt.Fprintf(&msg, "Mode    : ")
 	if m.Mode == "" {
-		fmt.Fprintf(&msg, console.Colorize("RetentionNotFound", "NO RETENTION"))
+		fmt.Fprint(&msg, console.Colorize("RetentionNotFound", "NO RETENTION"))
 	} else {
-		fmt.Fprintf(&msg, console.Colorize("RetentionSuccess", m.Mode))
+		fmt.Fprint(&msg, console.Colorize("RetentionSuccess", m.Mode))
 		if !m.Until.IsZero() {
 			msg.WriteString(", ")
 			exp := ""
@@ -231,10 +231,10 @@ func (m retentionInfoMessageRecord) String() string {
 				prettyDuration := timeDurationToHumanizedDuration(m.Until.Sub(now)).StringShort()
 				exp = console.Colorize("RetentionSuccess", "expiring in "+prettyDuration)
 			}
-			fmt.Fprintf(&msg, exp)
+			fmt.Fprint(&msg, exp)
 		}
 	}
-	fmt.Fprintf(&msg, "\n")
+	fmt.Fprint(&msg, "\n")
 	return msg.String()
 }
 
@@ -381,7 +381,7 @@ func mainRetentionInfo(cliCtx *cli.Context) error {
 
 	target, versionID, recursive, rewind, withVersions, bucketMode := parseInfoRetentionArgs(cliCtx)
 
-	fatalIfBucketLockNotEnabled(ctx, target)
+	fatalIfBucketLockNotSupported(ctx, target)
 
 	if bucketMode {
 		return showBucketLock(target)

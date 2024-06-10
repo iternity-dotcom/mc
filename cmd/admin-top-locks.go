@@ -19,7 +19,6 @@ package cmd
 
 import (
 	"github.com/minio/cli"
-	"github.com/minio/pkg/console"
 )
 
 var topLocksFlag = []cli.Flag{
@@ -46,7 +45,7 @@ var adminTopLocksCmd = cli.Command{
 `,
 }
 
-func mainAdminTopLocks(ctx *cli.Context) error {
-	console.Infoln("Please use 'mc support top locks'")
+func mainAdminTopLocks(_ *cli.Context) error {
+	deprecatedError("mc support top locks")
 	return nil
 }

@@ -65,7 +65,7 @@ func getExpirationDays(rule lifecycle.Rule) int {
 		return int(rule.Expiration.Days)
 	}
 	if !rule.Expiration.Date.Time.IsZero() {
-		return int(time.Now().UTC().Sub(rule.Expiration.Date.Time).Hours() / 24)
+		return int(time.Until(rule.Expiration.Date.Time).Hours() / 24)
 	}
 
 	return 0
@@ -82,7 +82,7 @@ func getTransitionDays(rule lifecycle.Rule) int {
 }
 
 // ToTables converts a lifecycle.Configuration into its tabular representation.
-func ToTables(cfg *lifecycle.Configuration, filter LsFilter) []Table {
+func ToTables(cfg *lifecycle.Configuration) []Table {
 	var tierCur tierCurrentTable
 	var tierNoncur tierNoncurrentTable
 	var expCur expirationCurrentTable
@@ -98,7 +98,7 @@ func ToTables(cfg *lifecycle.Configuration, filter LsFilter) []Table {
 				ExpireDelMarker: bool(rule.Expiration.DeleteMarker),
 			})
 		}
-		if !rule.NoncurrentVersionExpiration.IsDaysNull() {
+		if !rule.NoncurrentVersionExpiration.IsDaysNull() || rule.NoncurrentVersionExpiration.NewerNoncurrentVersions > 0 {
 			expNoncur = append(expNoncur, expirationNoncurrentRow{
 				ID:           rule.ID,
 				Status:       rule.Status,
@@ -130,12 +130,15 @@ func ToTables(cfg *lifecycle.Configuration, filter LsFilter) []Table {
 		}
 	}
 
-	switch filter {
-	case ExpiryOnly:
-		return []Table{expCur, expNoncur}
-	case TransitionOnly:
-		return []Table{tierCur, tierNoncur}
-	default:
-		return []Table{tierCur, tierNoncur, expCur, expNoncur}
+	var table []Table
+	inclTbl := func(tbl Table) {
+		if len(tbl.Rows()) > 0 {
+			table = append(table, tbl)
+		}
 	}
+	inclTbl(expCur)
+	inclTbl(expNoncur)
+	inclTbl(tierCur)
+	inclTbl(tierNoncur)
+	return table
 }

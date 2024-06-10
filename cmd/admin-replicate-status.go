@@ -21,13 +21,16 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
+	humanize "github.com/dustin/go-humanize"
 	"github.com/fatih/color"
 	"github.com/minio/cli"
 	json "github.com/minio/colorjson"
-	"github.com/minio/madmin-go"
+	"github.com/minio/madmin-go/v3"
 	"github.com/minio/mc/pkg/probe"
-	"github.com/minio/pkg/console"
+	"github.com/minio/minio-go/v7/pkg/replication"
+	"github.com/minio/pkg/v3/console"
 )
 
 var adminReplicateStatusFlags = []cli.Flag{
@@ -48,6 +51,10 @@ var adminReplicateStatusFlags = []cli.Flag{
 		Usage: "display only groups",
 	},
 	cli.BoolFlag{
+		Name:  "ilm-expiry-rules",
+		Usage: "display only ilm expiry rules",
+	},
+	cli.BoolFlag{
 		Name:  "all",
 		Usage: "display all available site replication status",
 	},
@@ -66,6 +73,10 @@ var adminReplicateStatusFlags = []cli.Flag{
 	cli.StringFlag{
 		Name:  "group",
 		Usage: "display group sync status",
+	},
+	cli.StringFlag{
+		Name:  "ilm-expiry-rule",
+		Usage: "display ILM expiry rule sync status",
 	},
 }
 
@@ -122,7 +133,9 @@ func (i srStatus) JSON() string {
 
 func (i srStatus) String() string {
 	var messages []string
-
+	ms := i.Metrics
+	q := i.Metrics.Queued
+	w := i.Metrics.ActiveWorkers
 	// Color palette initialization
 	console.SetColor("Summary", color.New(color.FgWhite, color.Bold))
 	console.SetColor("SummaryHdr", color.New(color.FgCyan, color.Bold))
@@ -174,7 +187,7 @@ func (i srStatus) String() string {
 					ss := ssMap[dID]
 					switch {
 					case !ss.HasBucket:
-						details = append(details, fmt.Sprintf("%s Bucket", blankCell))
+						details = append(details, fmt.Sprintf("%s ", blankCell))
 					case ss.OLockConfigMismatch, ss.PolicyMismatch, ss.QuotaCfgMismatch, ss.ReplicationCfgMismatch, ss.TagMismatch:
 						details = append(details, fmt.Sprintf("%s in-sync", crossTickCell))
 					default:
@@ -212,7 +225,7 @@ func (i srStatus) String() string {
 					ss := ssMap[dID]
 					switch {
 					case !ss.HasPolicy:
-						details = append(details, fmt.Sprintf("%s Policy", blankCell))
+						details = append(details, blankCell)
 					case ss.PolicyMismatch:
 						details = append(details, fmt.Sprintf("%s in-sync", crossTickCell))
 					default:
@@ -252,7 +265,7 @@ func (i srStatus) String() string {
 
 					switch {
 					case !ss.HasUser:
-						details = append(details, fmt.Sprintf("%s", blankCell))
+						details = append(details, blankCell)
 					case !ok, ss.UserInfoMismatch:
 						details = append(details, fmt.Sprintf("%s in-sync", crossTickCell))
 					default:
@@ -292,7 +305,7 @@ func (i srStatus) String() string {
 					ss := ssMap[dID]
 					switch {
 					case !ss.HasGroup:
-						details = append(details, fmt.Sprintf("%s", blankCell))
+						details = append(details, blankCell)
 					case ss.GroupDescMismatch:
 						details = append(details, fmt.Sprintf("%s in-sync", crossTickCell))
 					default:
@@ -307,6 +320,44 @@ func (i srStatus) String() string {
 			}
 		}
 	}
+	if i.opts.ILMExpiryRules {
+		messages = append(messages,
+			console.Colorize("SummaryHdr", "ILM Expiry Rules replication status:"))
+		switch {
+		case i.MaxILMExpiryRules == 0:
+			messages = append(messages, console.Colorize("Summary", "No ILM Expiry Rules present\n"))
+		case i.ILMExpiryStats == nil:
+			messages = append(messages, console.Colorize("Summary", "Replication of ILM Expiry is not enabled\n"))
+		default:
+			msg := console.Colorize(i.getTheme(len(info.ILMExpiryStats) == 0), fmt.Sprintf("%d/%d ILM Expiry Rules in sync", info.MaxILMExpiryRules-len(info.ILMExpiryStats), info.MaxILMExpiryRules)) + "\n"
+			messages = append(messages, fmt.Sprintf("%s  %s", coloredDot, msg))
+			if len(i.ILMExpiryStats) > 0 {
+				messages = append(messages, i.siteHeader(siteNames, "ILM Expiry Rules"))
+			}
+			var detailFields []Field
+			for b, ssMap := range i.ILMExpiryStats {
+				var details []string
+				details = append(details, b)
+				detailFields = append(detailFields, legendFields[0])
+				for _, sname := range siteNames {
+					detailFields = append(detailFields, legendFields[0])
+					dID := nameIDMap[sname]
+					ss := ssMap[dID]
+					switch {
+					case !ss.HasILMExpiryRules:
+						details = append(details, blankCell)
+					case ss.ILMExpiryRuleMismatch:
+						details = append(details, fmt.Sprintf("%s in-sync", crossTickCell))
+					default:
+						details = append(details, fmt.Sprintf("%s in-sync", tickCell))
+					}
+				}
+				messages = append(messages, newPrettyTable(" | ",
+					detailFields...).buildRow(details...))
+				messages = append(messages, "")
+			}
+		}
+	}
 
 	switch i.opts.Entity {
 	case madmin.SRBucketEntity:
@@ -317,9 +368,89 @@ func (i srStatus) String() string {
 		messages = append(messages, i.getUserStatusSummary(siteNames, nameIDMap, "User")...)
 	case madmin.SRGroupEntity:
 		messages = append(messages, i.getGroupStatusSummary(siteNames, nameIDMap, "Group")...)
-
+	case madmin.SRILMExpiryRuleEntity:
+		messages = append(messages, i.getILMExpiryStatusSummary(siteNames, nameIDMap, "ILMExpiryRule")...)
 	}
+	if i.opts.Metrics {
+		uiFn := func(theme string) func(string) string {
+			return func(s string) string {
+				return console.Colorize(theme, s)
+			}
+		}
+		singleTgt := len(ms.Metrics) == 1
+		maxui := uiFn("Peak")
+		avgui := uiFn("Avg")
+		valueui := uiFn("Value")
+		messages = append(messages,
+			console.Colorize("SummaryHdr", "Object replication status:"))
 
+		messages = append(messages, console.Colorize("UptimeStr", fmt.Sprintf("Replication status since %s", uiFn("Uptime")(humanize.RelTime(time.Now(), time.Now().Add(time.Duration(ms.Uptime)*time.Second), "", "ago")))))
+		// for queue stats
+		coloredDot := console.Colorize("qStatusOK", dot)
+		if q.Curr.Count > q.Avg.Count {
+			coloredDot = console.Colorize("qStatusWarn", dot)
+		}
+
+		var replicatedCount, replicatedSize int64
+		for _, m := range ms.Metrics {
+			nodeName := m.Endpoint
+			nodeui := uiFn(getNodeTheme(nodeName))
+			messages = append(messages, nodeui(nodeName))
+			messages = append(messages, fmt.Sprintf("Replicated:    %s objects (%s)", humanize.Comma(int64(m.ReplicatedCount)), valueui(humanize.IBytes(uint64(m.ReplicatedSize)))))
+
+			if singleTgt { // for single target - combine summary section into the target section
+				messages = append(messages, fmt.Sprintf("Received:      %s objects (%s)", humanize.Comma(int64(ms.ReplicaCount)), humanize.IBytes(uint64(ms.ReplicaSize))))
+				messages = append(messages, fmt.Sprintf("Queued:        %s %s objects, (%s) (%s: %s objects, %s; %s: %s objects, %s)", coloredDot, humanize.Comma(int64(q.Curr.Count)), valueui(humanize.IBytes(uint64(q.Curr.Bytes))), avgui("avg"),
+					humanize.Comma(int64(q.Avg.Count)), valueui(humanize.IBytes(uint64(q.Avg.Bytes))), maxui("max"),
+					humanize.Comma(int64(q.Max.Count)), valueui(humanize.IBytes(uint64(q.Max.Bytes)))))
+				messages = append(messages, fmt.Sprintf("Workers:       %s (%s: %s; %s %s) ", humanize.Comma(int64(w.Curr)), avgui("avg"), humanize.Comma(int64(w.Avg)), maxui("max"), humanize.Comma(int64(w.Max))))
+			} else {
+				replicatedCount += m.ReplicatedCount
+				replicatedSize += m.ReplicatedSize
+			}
+
+			if m.XferStats != nil {
+				tgtXfer, ok := m.XferStats[replication.Total]
+				if ok {
+					messages = append(messages, fmt.Sprintf("Transfer Rate: %s/s (avg: %s/s; max %s/s)", valueui(humanize.Bytes(uint64(tgtXfer.CurrRate))), valueui(humanize.Bytes(uint64(tgtXfer.AvgRate))), valueui(humanize.Bytes(uint64(tgtXfer.PeakRate)))))
+					messages = append(messages, fmt.Sprintf("Latency:       %s (avg: %s; max %s)", valueui(m.Latency.Curr.Round(time.Millisecond).String()), valueui(m.Latency.Avg.Round(time.Millisecond).String()), valueui(m.Latency.Max.Round(time.Millisecond).String())))
+				}
+			}
+
+			healthDot := console.Colorize("online", dot)
+			if !m.Online {
+				healthDot = console.Colorize("offline", dot)
+			}
+			currDowntime := time.Duration(0)
+			if !m.Online && !m.LastOnline.IsZero() {
+				currDowntime = UTCNow().Sub(m.LastOnline)
+			}
+			// normalize because total downtime is calculated at server side at heartbeat interval, may be slightly behind
+			totalDowntime := m.TotalDowntime
+			if currDowntime > totalDowntime {
+				totalDowntime = currDowntime
+			}
+			var linkStatus string
+			if m.Online {
+				linkStatus = healthDot + fmt.Sprintf(" online (total downtime: %s)", timeDurationToHumanizedDuration(totalDowntime).String())
+			} else {
+				linkStatus = healthDot + fmt.Sprintf(" offline %s (total downtime: %s)", timeDurationToHumanizedDuration(currDowntime).String(), valueui(timeDurationToHumanizedDuration(totalDowntime).String()))
+			}
+			messages = append(messages, fmt.Sprintf("Link:          %s", linkStatus))
+			messages = append(messages, fmt.Sprintf("Errors:        %s in last 1 minute; %s in last 1hr; %s since uptime", valueui(humanize.Comma(int64(m.Failed.LastMinute.Count))), valueui(humanize.Comma(int64(m.Failed.LastHour.Count))), valueui(humanize.Comma(int64(m.Failed.Totals.Count)))))
+			messages = append(messages, "")
+		}
+		if !singleTgt {
+			messages = append(messages,
+				console.Colorize("SummaryHdr", "Summary:"))
+			messages = append(messages, fmt.Sprintf("Replicated:    %s objects (%s)", humanize.Comma(int64(replicatedCount)), valueui(humanize.IBytes(uint64(replicatedSize)))))
+			messages = append(messages, fmt.Sprintf("Queued:        %s %s objects, (%s) (%s: %s objects, %s; %s: %s objects, %s)", coloredDot, humanize.Comma(int64(q.Curr.Count)), valueui(humanize.IBytes(uint64(q.Curr.Bytes))), avgui("avg"),
+				humanize.Comma(int64(q.Avg.Count)), valueui(humanize.IBytes(uint64(q.Avg.Bytes))), maxui("max"),
+				humanize.Comma(int64(q.Max.Count)), valueui(humanize.IBytes(uint64(q.Max.Bytes)))))
+
+			messages = append(messages, fmt.Sprintf("Received:      %s objects (%s)", humanize.Comma(int64(ms.ReplicaCount)), humanize.IBytes(uint64(ms.ReplicaSize))))
+		}
+	}
 	return console.Colorize("UserMessage", strings.Join(messages, "\n"))
 }
 
@@ -443,6 +574,7 @@ func (i srStatus) getBucketStatusSummary(siteNames []string, nameIDMap map[strin
 		}
 	}
 	messages = append(messages, rows...)
+
 	return messages
 }
 
@@ -631,28 +763,85 @@ func (i srStatus) getGroupStatusSummary(siteNames []string, nameIDMap map[string
 	return messages
 }
 
+func (i srStatus) getILMExpiryStatusSummary(siteNames []string, nameIDMap map[string]string, legend string) []string {
+	var messages []string
+	coloredDot := console.Colorize("Status", dot)
+	var found bool
+	for _, st := range i.SRStatusInfo.ILMExpiryStats[i.opts.EntityValue] {
+		if st.HasILMExpiryRules {
+			found = true
+			break
+		}
+	}
+	if !found {
+		messages = append(messages, console.Colorize("Summary", fmt.Sprintf("ILM Expiry Rule %s not found\n", i.opts.EntityValue)))
+		return messages
+	}
+
+	rowLegend := []string{"ILM Expiry Rule"}
+	detailFields := make([][]Field, len(rowLegend))
+
+	var rules []string
+	detailFields[0] = make([]Field, len(siteNames)+1)
+	detailFields[0][0] = Field{"Entity", 15}
+	rules = append(rules, "ILM Expiry Rule")
+	rows := make([]string, len(rowLegend))
+	for j, sname := range siteNames {
+		dID := nameIDMap[sname]
+		ss := i.SRStatusInfo.ILMExpiryStats[i.opts.EntityValue][dID]
+		var theme, msgStr string
+		for r := range rowLegend {
+			switch r {
+			case 0:
+				theme, msgStr = syncStatus(ss.ILMExpiryRuleMismatch, ss.HasILMExpiryRules)
+				rules = append(rules, msgStr)
+				detailFields[r][j+1] = Field{theme, fieldLen}
+			}
+		}
+	}
+	for r := range rowLegend {
+		switch r {
+		case 0:
+			rows[r] = newPrettyTable(" | ",
+				detailFields[r]...).buildRow(rules...)
+		}
+	}
+	messages = append(messages,
+		console.Colorize("SummaryHdr", fmt.Sprintf("%s  %s\n", coloredDot, console.Colorize("Summary", "ILM Expiry Rule replication summary for: ")+console.Colorize("UserMessage", i.opts.EntityValue))))
+	siteHdr := i.siteHeader(siteNames, legend)
+	messages = append(messages, siteHdr)
+
+	messages = append(messages, rows...)
+	return messages
+}
+
 // Calculate srstatus options for command line flags
 func srStatusOpts(ctx *cli.Context) (opts madmin.SRStatusOptions) {
 	if !(ctx.IsSet("buckets") ||
 		ctx.IsSet("users") ||
 		ctx.IsSet("groups") ||
 		ctx.IsSet("policies") ||
+		ctx.IsSet("ilm-expiry-rules") ||
 		ctx.IsSet("bucket") ||
 		ctx.IsSet("user") ||
 		ctx.IsSet("group") ||
 		ctx.IsSet("policy") ||
+		ctx.IsSet("ilm-expiry-rule") ||
 		ctx.IsSet("all")) || ctx.IsSet("all") {
 		opts.Buckets = true
 		opts.Users = true
 		opts.Groups = true
 		opts.Policies = true
+		opts.Metrics = true
+		opts.ILMExpiryRules = true
 		return
 	}
 	opts.Buckets = ctx.Bool("buckets")
 	opts.Policies = ctx.Bool("policies")
 	opts.Users = ctx.Bool("users")
 	opts.Groups = ctx.Bool("groups")
-	for _, name := range []string{"bucket", "user", "group", "policy"} {
+	opts.ILMExpiryRules = ctx.Bool("ilm-expiry-rules")
+	for _, name := range []string{"bucket", "user", "group", "policy", "ilm-expiry-rule"} {
 		if ctx.IsSet(name) {
 			opts.Entity = madmin.GetSREntityType(name)
 			opts.EntityValue = ctx.String(name)
@@ -670,13 +859,13 @@ func mainAdminReplicationStatus(ctx *cli.Context) error {
 			fatalIf(errInvalidArgument().Trace(ctx.Args().Tail()...),
 				"Need exactly one alias argument.")
 		}
-		groupStatus := ctx.IsSet("buckets") || ctx.IsSet("groups") || ctx.IsSet("users") || ctx.IsSet("policies")
-		indivStatus := ctx.IsSet("bucket") || ctx.IsSet("group") || ctx.IsSet("user") || ctx.IsSet("policy")
+		groupStatus := ctx.IsSet("buckets") || ctx.IsSet("groups") || ctx.IsSet("users") || ctx.IsSet("policies") || ctx.IsSet("ilm-expiry-rules")
+		indivStatus := ctx.IsSet("bucket") || ctx.IsSet("group") || ctx.IsSet("user") || ctx.IsSet("policy") || ctx.IsSet("ilm-expiry-rule")
 		if groupStatus && indivStatus {
 			fatalIf(errInvalidArgument().Trace(ctx.Args().Tail()...),
-				"Cannot specify both (bucket|group|policy|user) flag and one or more of buckets|groups|policies|users) flag(s)")
+				"Cannot specify both (bucket|group|policy|user|ilm-expiry-rule) flag and one or more of buckets|groups|policies|users|ilm-expiry-rules) flag(s)")
 		}
-		setSlc := []bool{ctx.IsSet("bucket"), ctx.IsSet("user"), ctx.IsSet("group"), ctx.IsSet("policy")}
+		setSlc := []bool{ctx.IsSet("bucket"), ctx.IsSet("user"), ctx.IsSet("group"), ctx.IsSet("policy"), ctx.IsSet("ilm-expiry-rule")}
 		count := 0
 		for _, s := range setSlc {
 			if s {
@@ -685,12 +874,29 @@ func mainAdminReplicationStatus(ctx *cli.Context) error {
 		}
 		if count > 1 {
 			fatalIf(errInvalidArgument().Trace(ctx.Args().Tail()...),
-				"Cannot specify more than one of --bucket, --policy, --user, --group flags at the same time")
+				"Cannot specify more than one of --bucket, --policy, --user, --group, --ilm-expiry-rule  flags at the same time")
 		}
 	}
 
 	console.SetColor("UserMessage", color.New(color.FgGreen))
 	console.SetColor("WarningMessage", color.New(color.FgYellow))
+	for _, c := range colors {
+		console.SetColor(fmt.Sprintf("Node%d", c), color.New(c, color.Bold))
+	}
+	console.SetColor("Replicated", color.New(color.FgCyan))
+	console.SetColor("In-Queue", color.New(color.Bold, color.FgYellow))
+	console.SetColor("Avg", color.New(color.FgCyan))
+	console.SetColor("Peak", color.New(color.FgYellow))
+	console.SetColor("Value", color.New(color.FgWhite, color.Bold))
+
+	console.SetColor("Current", color.New(color.FgCyan))
+	console.SetColor("Uptime", color.New(color.Bold, color.FgWhite))
+	console.SetColor("UptimeStr", color.New(color.FgHiWhite))
+
+	console.SetColor("qStatusWarn", color.New(color.FgYellow, color.Bold))
+	console.SetColor("qStatusOK", color.New(color.FgGreen, color.Bold))
+	console.SetColor("online", color.New(color.FgGreen, color.Bold))
+	console.SetColor("offline", color.New(color.FgRed, color.Bold))
 
 	// Get the alias parameter from cli
 	args := ctx.Args()
@@ -713,11 +919,11 @@ func mainAdminReplicationStatus(ctx *cli.Context) error {
 
 func syncStatus(mismatch, set bool) (string, string) {
 	if !set {
-		return "Entity", fmt.Sprintf("%s", blankCell)
+		return "Entity", blankCell
 	}
 	if mismatch {
-		return "Entity", fmt.Sprintf("%s", crossTickCell)
+		return "Entity", crossTickCell
 	}
 
-	return "Entity", fmt.Sprintf("%s", tickCell)
+	return "Entity", tickCell
 }

@@ -24,7 +24,7 @@ import (
 	"github.com/minio/cli"
 	json "github.com/minio/colorjson"
 	"github.com/minio/mc/pkg/probe"
-	"github.com/minio/pkg/console"
+	"github.com/minio/pkg/v3/console"
 )
 
 const licUnregisterMsgTag = "licenseUnregisterMessage"
@@ -36,7 +36,7 @@ var licenseUnregisterCmd = cli.Command{
 	Action:       mainLicenseUnregister,
 	Before:       setGlobalsFromContext,
 	Hidden:       true,
-	Flags:        supportGlobalFlags,
+	Flags:        subnetCommonFlags,
 	CustomHelpTemplate: `NAME:
   {{.HelpName}} - {{.Usage}}
 
@@ -83,14 +83,19 @@ func mainLicenseUnregister(ctx *cli.Context) error {
 	checkLicenseUnregisterSyntax(ctx)
 
 	aliasedURL := ctx.Args().Get(0)
-	alias, _ := initSubnetConnectivity(ctx, aliasedURL, false)
+	alias, apiKey := initSubnetConnectivity(ctx, aliasedURL, true)
+	if len(apiKey) == 0 {
+		// api key not passed as flag. Check that the cluster is registered.
+		apiKey = validateClusterRegistered(alias, true)
+	}
 
-	apiKey, e := getSubnetAPIKey(alias)
-	fatalIf(probe.NewError(e), "Error in fetching SUBNET API Key:")
+	if !globalAirgapped {
+		info := getAdminInfo(aliasedURL)
+		e := unregisterClusterFromSubnet(info.DeploymentID, apiKey)
+		fatalIf(probe.NewError(e), "Could not unregister cluster from SUBNET:")
+	}
 
-	info := getAdminInfo(aliasedURL)
-	e = unregisterClusterFromSubnet(alias, info.DeploymentID, apiKey)
-	fatalIf(probe.NewError(e), "Could not unregister cluster from SUBNET:")
+	removeSubnetAuthConfig(alias)
 
 	printMsg(licUnregisterMessage{Status: "success", Alias: alias})
 	return nil

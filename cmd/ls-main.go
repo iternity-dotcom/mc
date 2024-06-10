@@ -26,7 +26,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/minio/cli"
 	"github.com/minio/mc/pkg/probe"
-	"github.com/minio/pkg/console"
+	"github.com/minio/pkg/v3/console"
 )
 
 // ls specific flags.
@@ -157,7 +157,7 @@ func parseRewindFlag(rewind string) (timeRef time.Time) {
 }
 
 // checkListSyntax - validate all the passed arguments
-func checkListSyntax(ctx context.Context, cliCtx *cli.Context) ([]string, doListOptions) {
+func checkListSyntax(cliCtx *cli.Context) ([]string, doListOptions) {
 	args := cliCtx.Args()
 	if !cliCtx.Args().Present() {
 		args = []string{"."}
@@ -210,7 +210,7 @@ func mainList(cliCtx *cli.Context) error {
 	console.SetColor("SC", color.New(color.FgBlue))
 
 	// check 'ls' cliCtx arguments.
-	args, opts := checkListSyntax(ctx, cliCtx)
+	args, opts := checkListSyntax(cliCtx)
 
 	var cErr error
 	for _, targetURL := range args {

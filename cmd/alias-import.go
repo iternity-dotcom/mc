@@ -22,9 +22,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/minio/mc/pkg/probe"
-
 	"github.com/minio/cli"
+	"github.com/minio/mc/pkg/probe"
 )
 
 var aliasImportCmd = cli.Command{
@@ -95,8 +94,8 @@ func checkCredentialsSyntax(credentials aliasConfigV10) {
 	}
 
 	if !isValidSecretKey(credentials.SecretKey) {
-		fatalIf(errInvalidArgument().Trace(credentials.SecretKey),
-			"Invalid secret key `"+credentials.SecretKey+"`.")
+		fatalIf(errInvalidArgument().Trace(),
+			"Invalid secret key.")
 	}
 
 	if credentials.API != "" && !isValidAPI(credentials.API) { // Empty value set to default "S3v4".

@@ -26,7 +26,7 @@ import (
 	json "github.com/minio/colorjson"
 	"github.com/minio/mc/pkg/probe"
 	"github.com/minio/minio-go/v7"
-	"github.com/minio/pkg/console"
+	"github.com/minio/pkg/v3/console"
 )
 
 // Structured message depending on the type of console.
@@ -95,10 +95,10 @@ func (m retentionBucketMessage) String() string {
 		return console.Colorize("RetentionSuccess", "Object lock configuration cleared successfully.")
 	}
 	// info/set command
-	if m.Mode == "" {
-		return console.Colorize("RetentionNotFound", "Object locking configuration is not enabled.")
+	if !m.Mode.IsValid() {
+		return console.Colorize("RetentionNotFound", "Object locking is not enabled.")
 	}
-	return console.Colorize("RetentionSuccess", fmt.Sprintf("Object locking configuration '%s' is enabled for %s.",
+	return console.Colorize("RetentionSuccess", fmt.Sprintf("Object locking '%s' is configured for %s.",
 		console.Colorize("Mode", m.Mode), console.Colorize("Validity", m.Validity)))
 }
 
@@ -170,11 +170,10 @@ func parseRetentionValidity(validityStr string) (uint64, minio.ValidityUnit, *pr
 	return validity, unit, nil
 }
 
-func fatalIfBucketLockNotEnabled(ctx context.Context, aliasedURL string) {
-	enabled, err := getBucketLockStatus(ctx, aliasedURL)
-	fatalIf(err.Trace(), "Unable to get bucket lock configuration from `%s`", aliasedURL)
-	if enabled != "Enabled" {
-		fatalIf(errDummy().Trace(), "Remote bucket does not support locking `%s`", aliasedURL)
+func fatalIfBucketLockNotSupported(ctx context.Context, aliasedURL string) {
+	_, err := getBucketLockStatus(ctx, aliasedURL)
+	if err != nil {
+		fatalIf(errDummy().Trace(), "Remote bucket `%s` does not support locking", aliasedURL)
 	}
 }
 

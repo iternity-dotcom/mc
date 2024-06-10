@@ -19,13 +19,17 @@ package cmd
 
 import (
 	"fmt"
+	"net"
+	"net/url"
+	"os"
 
 	"github.com/fatih/color"
 	"github.com/minio/cli"
 	json "github.com/minio/colorjson"
-	"github.com/minio/madmin-go"
+	"github.com/minio/madmin-go/v3"
 	"github.com/minio/mc/pkg/probe"
-	"github.com/minio/pkg/console"
+	"github.com/minio/minio-go/v7/pkg/set"
+	"github.com/minio/pkg/v3/console"
 )
 
 const (
@@ -38,6 +42,10 @@ var licenseRegisterFlags = append([]cli.Flag{
 		Name:  "name",
 		Usage: "Specify the name to associate to this MinIO cluster in SUBNET",
 	},
+	cli.StringFlag{
+		Name:  "license",
+		Usage: "license of the account on SUBNET",
+	},
 }, subnetCommonFlags...)
 
 var licenseRegisterCmd = cli.Command{
@@ -46,7 +54,7 @@ var licenseRegisterCmd = cli.Command{
 	OnUsageError: onUsageError,
 	Action:       mainLicenseRegister,
 	Before:       setGlobalsFromContext,
-	Flags:        append(licenseRegisterFlags, supportGlobalFlags...),
+	Flags:        licenseRegisterFlags,
 	CustomHelpTemplate: `NAME:
   {{.HelpName}} - {{.Usage}}
 
@@ -60,14 +68,17 @@ EXAMPLES:
   1. Register MinIO cluster at alias 'play' on SUBNET, using api key for auth
      {{.Prompt}} {{.HelpName}} play --api-key 08efc836-4289-dbd4-ad82-b5e8b6d25577
 
-  2. Register MinIO cluster at alias 'play' on SUBNET, using api key for auth,
+  2. Register MinIO cluster at alias 'play' on SUBNET, using license file ./minio.license
+     {{.Prompt}} {{.HelpName}} play --license ./minio.license
+
+  3. Register MinIO cluster at alias 'play' on SUBNET, using api key for auth,
      and "play-cluster" as the preferred name for the cluster on SUBNET.
      {{.Prompt}} {{.HelpName}} play --api-key 08efc836-4289-dbd4-ad82-b5e8b6d25577 --name play-cluster
 
-  3. Register MinIO cluster at alias 'play' on SUBNET in an airgapped environment
+  4. Register MinIO cluster at alias 'play' on SUBNET in an airgapped environment
      {{.Prompt}} {{.HelpName}} play --airgap
 
-  4. Register MinIO cluster at alias 'play' on SUBNET, using alias as the cluster name.
+  5. Register MinIO cluster at alias 'play' on SUBNET, using alias as the cluster name.
      This asks for SUBNET credentials if the cluster is not already registered.
      {{.Prompt}} {{.HelpName}} play
 `,
@@ -149,6 +160,48 @@ type SubnetMFAReq struct {
 	Token    string `json:"token"`
 }
 
+func isPlay(endpoint url.URL) (bool, error) {
+	playEndpoint := "https://play.min.io"
+	if globalAirgapped {
+		return endpoint.String() == playEndpoint, nil
+	}
+
+	aliasIPs, e := net.LookupHost(endpoint.Hostname())
+	if e != nil {
+		return false, e
+	}
+	aliasIPSet := set.CreateStringSet(aliasIPs...)
+
+	playURL, e := url.Parse(playEndpoint)
+	if e != nil {
+		return false, e
+	}
+
+	playIPs, e := net.LookupHost(playURL.Hostname())
+	if e != nil {
+		return false, e
+	}
+
+	playIPSet := set.CreateStringSet(playIPs...)
+	return !aliasIPSet.Intersection(playIPSet).IsEmpty(), nil
+}
+
+func validateNotPlay(aliasedURL string) {
+	client := getClient(aliasedURL)
+	endpoint := client.GetEndpointURL()
+	if endpoint == nil {
+		fatal(errDummy().Trace(), "invalid endpoint on alias "+aliasedURL)
+		return
+	}
+
+	isplay, e := isPlay(*endpoint)
+	fatalIf(probe.NewError(e), "error checking if endpoint is play:")
+
+	if isplay {
+		fatal(errDummy().Trace(), "play is a public demo cluster; cannot be registered")
+	}
+}
+
 func mainLicenseRegister(ctx *cli.Context) error {
 	console.SetColor(licRegisterMsgTag, color.New(color.FgGreen, color.Bold))
 	console.SetColor(licRegisterLinkTag, color.New(color.FgWhite, color.Bold))
@@ -156,7 +209,19 @@ func mainLicenseRegister(ctx *cli.Context) error {
 
 	// Get the alias parameter from cli
 	aliasedURL := ctx.Args().Get(0)
-	alias, accAPIKey := initSubnetConnectivity(ctx, aliasedURL, true)
+	validateNotPlay(aliasedURL)
+
+	licFile := ctx.String("license")
+
+	var alias, accAPIKey string
+	if len(licFile) > 0 {
+		licBytes, e := os.ReadFile(licFile)
+		fatalIf(probe.NewError(e), fmt.Sprintf("Unable to read license file %s", licFile))
+		alias, _ = url2Alias(aliasedURL)
+		accAPIKey = validateAndSaveLic(string(licBytes), alias, true)
+	} else {
+		alias, accAPIKey = initSubnetConnectivity(ctx, aliasedURL, false)
+	}
 
 	clusterName := ctx.String("name")
 	if len(clusterName) == 0 {
@@ -167,37 +232,46 @@ func mainLicenseRegister(ctx *cli.Context) error {
 		}
 	}
 
-	regInfo := getClusterRegInfo(getAdminInfo(aliasedURL), clusterName)
-
-	alreadyRegistered := false
-	apiKey, _, e := getSubnetCreds(alias)
-	fatalIf(probe.NewError(e), "Error in fetching subnet API Key")
-	if len(apiKey) > 0 {
-		alreadyRegistered = true
-		if len(accAPIKey) == 0 {
-			accAPIKey = apiKey
-		}
-	}
+	regInfo := GetClusterRegInfo(getAdminInfo(aliasedURL), clusterName)
 
 	lrm := licRegisterMessage{Status: "success", Alias: alias}
-	if globalAirgapped {
-		lrm.Type = "offline"
-
-		regToken, e := generateRegToken(regInfo)
-		fatalIf(probe.NewError(e), "Unable to generate registration token")
-
-		lrm.URL = subnetOfflineRegisterURL(regToken)
-	} else {
-		lrm.Type = "online"
-		_, _, e = registerClusterOnSubnet(regInfo, alias, accAPIKey)
-		fatalIf(probe.NewError(e), "Could not register cluster with SUBNET:")
-
-		lrm.Action = "registered"
-		if alreadyRegistered {
-			lrm.Action = "updated"
+	if !globalAirgapped {
+		alreadyRegistered := false
+		if len(accAPIKey) == 0 {
+			apiKey, _, e := getSubnetCreds(alias)
+			fatalIf(probe.NewError(e), "Error in fetching subnet API Key")
+			if len(apiKey) > 0 {
+				alreadyRegistered = true
+				accAPIKey = apiKey
+			}
+		} else {
+			apiKey := getSubnetAPIKeyFromConfig(alias)
+			if len(apiKey) > 0 {
+				alreadyRegistered = true
+			}
 		}
+
+		lrm.Type = "online"
+		_, _, e := registerClusterOnSubnet(regInfo, alias, accAPIKey)
+		if e == nil {
+			lrm.Action = "registered"
+			if alreadyRegistered {
+				lrm.Action = "updated"
+			}
+			printMsg(lrm)
+			return nil
+		}
+
+		console.Println("Could not register cluster with SUBNET: ", e.Error())
 	}
 
+	// Airgapped mode OR online mode with registration failure
+	lrm.Type = "offline"
+
+	regToken, e := generateRegToken(regInfo)
+	fatalIf(probe.NewError(e), "Unable to generate registration token")
+
+	lrm.URL = subnetOfflineRegisterURL(regToken)
 	printMsg(lrm)
 	return nil
 }

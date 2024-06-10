@@ -23,17 +23,28 @@ import (
 	"fmt"
 	"hash/fnv"
 	"net/http"
+	"net/url"
+	"os"
 	"path"
+	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/dustin/go-humanize"
 	"github.com/fatih/color"
 	"github.com/minio/cli"
 	json "github.com/minio/colorjson"
-	"github.com/minio/madmin-go"
+	"github.com/minio/madmin-go/v3"
 	"github.com/minio/mc/pkg/probe"
-	"github.com/minio/pkg/console"
+	"github.com/minio/pkg/v3/console"
+	"github.com/muesli/reflow/truncate"
+	"github.com/olekukonko/tablewriter"
+	"golang.org/x/term"
 )
 
 var adminTraceFlags = []cli.Flag{
@@ -47,11 +58,7 @@ var adminTraceFlags = []cli.Flag{
 	},
 	cli.StringSliceFlag{
 		Name:  "call",
-		Usage: "trace only matching call types (e.g. `s3`, `internal`, `storage`, `os`, `scanner`, `decommission`, `healing`)",
-	},
-	cli.DurationFlag{
-		Name:  "response-threshold",
-		Usage: "trace calls only with response duration greater than this threshold (e.g. `5ms`)",
+		Usage: "trace only matching call types. See CALL TYPES below for list. (default: s3)",
 	},
 	cli.IntSliceFlag{
 		Name:  "status-code",
@@ -77,15 +84,111 @@ var adminTraceFlags = []cli.Flag{
 		Name:  "request-header",
 		Usage: "trace only matching request headers",
 	},
+	cli.StringSliceFlag{
+		Name:  "request-query",
+		Usage: "trace only matching request queries",
+	},
 	cli.BoolFlag{
 		Name:  "errors, e",
 		Usage: "trace only failed requests",
 	},
+	cli.BoolFlag{
+		Name:  "stats",
+		Usage: "accumulate stats",
+	},
+	cli.IntFlag{
+		Name:   "stats-n",
+		Usage:  "maximum number of stat entries",
+		Value:  15,
+		Hidden: true,
+	},
+	cli.BoolFlag{
+		Name:  "filter-request",
+		Usage: "trace calls only with request bytes greater than this threshold, use with filter-size",
+	},
+	cli.BoolFlag{
+		Name:  "filter-response",
+		Usage: "trace calls only with response bytes greater than this threshold, use with filter-size",
+	},
+	cli.DurationFlag{
+		Name:  "response-duration",
+		Usage: "trace calls only with response duration greater than this threshold (e.g. `5ms`)",
+	},
+	cli.StringFlag{
+		Name:  "filter-size",
+		Usage: "filter size, use with filter (see UNITS)",
+	},
+}
+
+// traceCallTypes contains all call types and flags to apply when selected.
+var traceCallTypes = map[string]func(o *madmin.ServiceTraceOpts) (help string){
+	"storage":   func(o *madmin.ServiceTraceOpts) string { o.Storage = true; return "Trace Storage calls" },
+	"internal":  func(o *madmin.ServiceTraceOpts) string { o.Internal = true; return "Trace Internal RPC calls" },
+	"s3":        func(o *madmin.ServiceTraceOpts) string { o.S3 = true; return "Trace S3 API calls" },
+	"os":        func(o *madmin.ServiceTraceOpts) string { o.OS = true; return "Trace Operating System calls" },
+	"scanner":   func(o *madmin.ServiceTraceOpts) string { o.Scanner = true; return "Trace Scanner calls" },
+	"bootstrap": func(o *madmin.ServiceTraceOpts) string { o.Bootstrap = true; return "Trace Bootstrap operations" },
+	"ilm":       func(o *madmin.ServiceTraceOpts) string { o.ILM = true; return "Trace ILM operations" },
+	"ftp":       func(o *madmin.ServiceTraceOpts) string { o.FTP = true; return "Trace FTP operations" },
+
+	"healing": func(o *madmin.ServiceTraceOpts) string {
+		o.Healing = true
+		return "Trace Healing operations (alias: heal)"
+	},
+	"batch-replication": func(o *madmin.ServiceTraceOpts) string {
+		o.BatchReplication = true
+		return "Trace Batch Replication (alias: brep)"
+	},
+	"batch-keyrotation": func(o *madmin.ServiceTraceOpts) string {
+		o.BatchKeyRotation = true
+		return "Trace Batch KeyRotation (alias: brot)"
+	},
+	"batch-expiration": func(o *madmin.ServiceTraceOpts) string {
+		o.BatchExpire = true
+		return "Trace Batch Expiration (alias: bexp)"
+	},
+
+	"decommission": func(o *madmin.ServiceTraceOpts) string {
+		o.Decommission = true
+		return "Trace Decommission operations (alias: decom)"
+	},
+	"rebalance": func(o *madmin.ServiceTraceOpts) string {
+		o.Rebalance = true
+		return "Trace Server Pool Rebalancing operations"
+	},
+	"replication-resync": func(o *madmin.ServiceTraceOpts) string {
+		o.ReplicationResync = true
+		return "Trace Replication Resync operations (alias: resync)"
+	},
+}
+
+// traceCallTypes contains aliases (short versions) of
+var traceCallTypeAliases = map[string]func(o *madmin.ServiceTraceOpts) string{
+	"heal":   traceCallTypes["healing"],
+	"decom":  traceCallTypes["decommission"],
+	"resync": traceCallTypes["replication-resync"],
+	"brep":   traceCallTypes["batch-replication"],
+	"brot":   traceCallTypes["batch-keyrotation"],
+}
+
+func traceCallsHelp() string {
+	var help []string
+	o := madmin.ServiceTraceOpts{}
+	const padkeyLen = 19
+	for k, fn := range traceCallTypes {
+		pad := ""
+		if len(k) < padkeyLen {
+			pad = strings.Repeat(" ", padkeyLen-len(k))
+		}
+		help = append(help, fmt.Sprintf("  %s: %s%s", k, pad, fn(&o)))
+	}
+	sort.Strings(help)
+	return strings.Join(help, "\n")
 }
 
 var adminTraceCmd = cli.Command{
 	Name:            "trace",
-	Usage:           "show http trace for MinIO server",
+	Usage:           "Show HTTP call trace for all incoming and internode on MinIO",
 	Action:          mainAdminTrace,
 	OnUsageError:    onUsageError,
 	Before:          setGlobalsFromContext,
@@ -100,6 +203,16 @@ USAGE:
 FLAGS:
   {{range .VisibleFlags}}{{.}}
   {{end}}
+CALL TYPES:
+` + traceCallsHelp() + `
+
+UNITS
+  --filter-size flags use with --filter-response or --filter-request accept human-readable case-insensitive number
+  suffixes such as "k", "m", "g" and "t" referring to the metric units KB,
+  MB, GB and TB respectively. Adding an "i" to these prefixes, uses the IEC
+  units, so that "gi" refers to "gibibyte" or "GiB". A "b" at the end is
+  also accepted. Without suffixes the unit is bytes.
+
 EXAMPLES:
   1. Show verbose console trace for MinIO server
      {{.Prompt}} {{.HelpName}} -v -a myminio
@@ -115,6 +228,15 @@ EXAMPLES:
 
   5. Show console trace for requests with '404' and '503' status code
     {{.Prompt}} {{.HelpName}} --status-code 404 --status-code 503 myminio
+  
+  6. Show trace only for requests bytes greater than 1MB
+    {{.Prompt}} {{.HelpName}} --filter-request --filter-size 1MB myminio
+
+  7. Show trace only for response bytes greater than 1MB
+    {{.Prompt}} {{.HelpName}} --filter-response --filter-size 1MB myminio
+  
+  8. Show trace only for requests operations duration greater than 5ms
+     {{.Prompt}} {{.HelpName}} --response-duration 5ms myminio
 `,
 }
 
@@ -125,6 +247,15 @@ var colors = []color.Attribute{color.FgCyan, color.FgWhite, color.FgYellow, colo
 func checkAdminTraceSyntax(ctx *cli.Context) {
 	if len(ctx.Args()) != 1 {
 		showCommandHelpAndExit(ctx, 1) // last argument is exit code
+	}
+	filterFlag := ctx.Bool("filter-request") || ctx.Bool("filter-response")
+	if filterFlag && ctx.String("filter-size") == "" {
+		// filter must use with filter-size flags
+		showCommandHelpAndExit(ctx, 1)
+	}
+
+	if ctx.Bool("all") && len(ctx.StringSlice("call")) > 0 {
+		fatalIf(errDummy().Trace(), "You cannot specify both --all and --call flags at the same time.")
 	}
 }
 
@@ -142,15 +273,18 @@ type matchString struct {
 }
 
 type matchOpts struct {
-	statusCodes []int
-	methods     []string
-	funcNames   []string
-	apiPaths    []string
-	nodes       []string
-	reqHeaders  []matchString
+	statusCodes  []int
+	methods      []string
+	funcNames    []string
+	apiPaths     []string
+	nodes        []string
+	reqHeaders   []matchString
+	reqQueries   []matchString
+	requestSize  uint64
+	responseSize uint64
 }
 
-func matchTrace(opts matchOpts, traceInfo madmin.ServiceTraceInfo) bool {
+func (opts matchOpts) matches(traceInfo madmin.ServiceTraceInfo) bool {
 	// Filter request path if passed by the user
 	if len(opts.apiPaths) > 0 {
 		matched := false
@@ -229,7 +363,7 @@ func matchTrace(opts matchOpts, traceInfo madmin.ServiceTraceInfo) bool {
 			headerFound := false
 			for traceHdr, traceVals := range traceInfo.Trace.HTTP.ReqInfo.Headers {
 				for _, traceVal := range traceVals {
-					if headerMatch(hdr.val, traceHdr+": "+traceVal) {
+					if patternMatch(hdr.val, traceHdr+": "+traceVal) {
 						headerFound = true
 						goto exitFindingHeader
 					}
@@ -247,6 +381,42 @@ func matchTrace(opts matchOpts, traceInfo madmin.ServiceTraceInfo) bool {
 		}
 	}
 
+	if len(opts.reqQueries) > 0 && traceInfo.Trace.HTTP != nil {
+		matched := false
+		for _, qry := range opts.reqQueries {
+			queryFound := false
+			v, err := url.ParseQuery(traceInfo.Trace.HTTP.ReqInfo.RawQuery)
+			if err != nil {
+				continue
+			}
+			for traceQuery, traceVals := range v {
+				for _, traceVal := range traceVals {
+					if patternMatch(qry.val, traceQuery+"="+traceVal) {
+						queryFound = true
+						goto exitFindingQuery
+					}
+				}
+			}
+		exitFindingQuery:
+			if !qry.reverse && queryFound || qry.reverse && !queryFound {
+				matched = true
+				goto exitMatchingQuery
+			}
+		}
+	exitMatchingQuery:
+		if !matched {
+			return false
+		}
+	}
+
+	if opts.requestSize > 0 && traceInfo.Trace.HTTP.CallStats.InputBytes < int(opts.requestSize) {
+		return false
+	}
+
+	if opts.responseSize > 0 && traceInfo.Trace.HTTP.CallStats.OutputBytes < int(opts.responseSize) {
+		return false
+	}
+
 	return true
 }
 
@@ -257,30 +427,43 @@ func matchingOpts(ctx *cli.Context) (opts matchOpts) {
 	opts.apiPaths = ctx.StringSlice("path")
 	opts.nodes = ctx.StringSlice("node")
 	for _, s := range ctx.StringSlice("request-header") {
-		ms := matchString{}
-		ms.reverse = strings.HasPrefix(s, "!")
-		ms.val = strings.TrimPrefix(s, "!")
-		opts.reqHeaders = append(opts.reqHeaders, ms)
+		opts.reqHeaders = append(opts.reqHeaders, matchString{
+			reverse: strings.HasPrefix(s, "!"),
+			val:     strings.TrimPrefix(s, "!"),
+		})
 	}
+	for _, s := range ctx.StringSlice("request-query") {
+		opts.reqQueries = append(opts.reqQueries, matchString{
+			reverse: strings.HasPrefix(s, "!"),
+			val:     strings.TrimPrefix(s, "!"),
+		})
+	}
+
+	var e error
+	var requestSize, responseSize uint64
+	if ctx.Bool("filter-request") && ctx.String("filter-size") != "" {
+		requestSize, e = humanize.ParseBytes(ctx.String("filter-size"))
+		fatalIf(probe.NewError(e).Trace(ctx.String("filter-size")), "Unable to parse input bytes.")
+	}
+
+	if ctx.Bool("filter-response") && ctx.String("filter-size") != "" {
+		responseSize, e = humanize.ParseBytes(ctx.String("filter-size"))
+		fatalIf(probe.NewError(e).Trace(ctx.String("filter-size")), "Unable to parse input bytes.")
+	}
+	opts.requestSize = requestSize
+	opts.responseSize = responseSize
 	return
 }
 
 // Calculate tracing options for command line flags
 func tracingOpts(ctx *cli.Context, apis []string) (opts madmin.ServiceTraceOpts, e error) {
-	opts.Threshold = ctx.Duration("response-threshold")
+	opts.Threshold = ctx.Duration("response-duration")
 	opts.OnlyErrors = ctx.Bool("errors")
 
 	if ctx.Bool("all") {
-		opts.S3 = true
-		opts.Internal = true
-		opts.Storage = true
-		opts.OS = true
-		opts.Scanner = true
-		opts.Decommission = true
-		opts.Healing = true
-		opts.BatchReplication = true
-		opts.ReplicationResync = true
-		return
+		for _, fn := range traceCallTypes {
+			fn(&opts)
+		}
 	}
 
 	if len(apis) == 0 {
@@ -291,27 +474,15 @@ func tracingOpts(ctx *cli.Context, apis []string) (opts madmin.ServiceTraceOpts,
 	}
 
 	for _, api := range apis {
-		switch api {
-		case "storage":
-			opts.Storage = true
-		case "internal":
-			opts.Internal = true
-		case "s3":
-			opts.S3 = true
-		case "os":
-			opts.OS = true
-		case "scanner":
-			opts.Scanner = true
-		case "heal", "healing":
-			opts.Healing = true
-		case "decom", "decommission":
-			opts.Decommission = true
-		case "batch-replication":
-			opts.BatchReplication = true
-		case "rebalance":
-			opts.Rebalance = true
-		case "replication-resync":
-			opts.ReplicationResync = true
+		for _, api := range strings.Split(api, ",") {
+			fn, ok := traceCallTypes[api]
+			if !ok {
+				fn, ok = traceCallTypeAliases[api]
+			}
+			if !ok {
+				return madmin.ServiceTraceOpts{}, fmt.Errorf("unknown call name: `%s`", api)
+			}
+			fn(&opts)
 		}
 	}
 	return
@@ -323,6 +494,7 @@ func mainAdminTrace(ctx *cli.Context) error {
 	checkAdminTraceSyntax(ctx)
 
 	verbose := ctx.Bool("verbose")
+	stats := ctx.Bool("stats")
 	aliasedURL := ctx.Args().Get(0)
 
 	console.SetColor("Stat", color.New(color.FgYellow))
@@ -339,6 +511,7 @@ func mainAdminTrace(ctx *cli.Context) error {
 	console.SetColor("ErrStatus", color.New(color.Bold, color.FgRed))
 
 	console.SetColor("Response", color.New(color.FgGreen))
+	console.SetColor("Extra", color.New(color.FgBlue))
 	console.SetColor("Body", color.New(color.FgYellow))
 	for _, c := range colors {
 		console.SetColor(fmt.Sprintf("Node%d", c), color.New(c))
@@ -360,11 +533,36 @@ func mainAdminTrace(ctx *cli.Context) error {
 
 	// Start listening on all trace activity.
 	traceCh := client.ServiceTrace(ctxt, opts)
+	if stats {
+		filteredTraces := make(chan madmin.ServiceTraceInfo, 1)
+		ui := tea.NewProgram(initTraceStatsUI(ctx.Int("stats-n"), filteredTraces))
+		var te error
+		go func() {
+			for t := range traceCh {
+				if t.Err != nil {
+					te = t.Err
+					ui.Kill()
+					return
+				}
+				if mopts.matches(t) {
+					filteredTraces <- t
+				}
+			}
+		}()
+		if _, e := ui.Run(); e != nil {
+			cancel()
+			if te != nil {
+				e = te
+			}
+			fatalIf(probe.NewError(e).Trace(aliasedURL), "Unable to fetch http trace statistics")
+		}
+		return nil
+	}
 	for traceInfo := range traceCh {
 		if traceInfo.Err != nil {
 			fatalIf(probe.NewError(traceInfo.Err), "Unable to listen to http trace")
 		}
-		if matchTrace(mopts, traceInfo) {
+		if mopts.matches(traceInfo) {
 			printTrace(verbose, traceInfo)
 		}
 	}
@@ -374,19 +572,22 @@ func mainAdminTrace(ctx *cli.Context) error {
 
 // Short trace record
 type shortTraceMsg struct {
-	Status     string        `json:"status"`
-	Host       string        `json:"host"`
-	Time       time.Time     `json:"time"`
-	Client     string        `json:"client"`
-	CallStats  *callStats    `json:"callStats,omitempty"`
-	Duration   time.Duration `json:"duration"`
-	FuncName   string        `json:"api"`
-	Path       string        `json:"path"`
-	Query      string        `json:"query"`
-	StatusCode int           `json:"statusCode"`
-	StatusMsg  string        `json:"statusMsg"`
-	Type       string        `json:"type"`
-	Error      string        `json:"error"`
+	Status     string            `json:"status"`
+	Host       string            `json:"host"`
+	Time       time.Time         `json:"time"`
+	Client     string            `json:"client"`
+	CallStats  *callStats        `json:"callStats,omitempty"`
+	Duration   time.Duration     `json:"duration"`
+	TTFB       time.Duration     `json:"timeToFirstByte"`
+	FuncName   string            `json:"api"`
+	Path       string            `json:"path"`
+	Query      string            `json:"query"`
+	StatusCode int               `json:"statusCode"`
+	StatusMsg  string            `json:"statusMsg"`
+	Type       string            `json:"type"`
+	Size       int64             `json:"size,omitempty"`
+	Error      string            `json:"error"`
+	Extra      map[string]string `json:"extra"`
 	trcType    madmin.TraceType
 }
 
@@ -416,7 +617,7 @@ type callStats struct {
 	Rx       int           `json:"rx"`
 	Tx       int           `json:"tx"`
 	Duration time.Duration `json:"duration"`
-	Ttfb     time.Duration `json:"timeToFirstByte"`
+	TTFB     time.Duration `json:"timeToFirstByte"`
 }
 
 type verboseTrace struct {
@@ -433,6 +634,7 @@ type verboseTrace struct {
 	ResponseInfo *responseInfo          `json:"response,omitempty"`
 	CallStats    *callStats             `json:"callStats,omitempty"`
 	HealResult   *madmin.HealResultItem `json:"healResult,omitempty"`
+	Extra        map[string]string      `json:"extra,omitempty"`
 
 	trcType madmin.TraceType
 }
@@ -451,6 +653,8 @@ func shortTrace(ti madmin.ServiceTraceInfo) shortTraceMsg {
 	s.Host = t.NodeName
 	s.Duration = t.Duration
 	s.StatusMsg = t.Message
+	s.Extra = t.Custom
+	s.Size = t.Bytes
 
 	switch t.TraceType {
 	case madmin.TraceS3, madmin.TraceInternal:
@@ -459,9 +663,10 @@ func shortTrace(ti madmin.ServiceTraceInfo) shortTraceMsg {
 		s.StatusMsg = http.StatusText(t.HTTP.RespInfo.StatusCode)
 		s.Client = t.HTTP.ReqInfo.Client
 		s.CallStats = &callStats{}
-		s.CallStats.Duration = t.HTTP.CallStats.Latency
+		s.CallStats.Duration = t.Duration
 		s.CallStats.Rx = t.HTTP.CallStats.InputBytes
 		s.CallStats.Tx = t.HTTP.CallStats.OutputBytes
+		s.CallStats.TTFB = t.HTTP.CallStats.TimeToFirstByte
 	}
 	return s
 }
@@ -489,6 +694,12 @@ func (s shortTraceMsg) String() string {
 
 	switch s.trcType {
 	case madmin.TraceS3, madmin.TraceInternal:
+	case madmin.TraceBootstrap:
+		fmt.Fprintf(b, "[%s] %s %s %s", console.Colorize("RespStatus", strings.ToUpper(s.trcType.String())), console.Colorize("FuncName", s.FuncName),
+			hostStr,
+			s.StatusMsg,
+		)
+		return b.String()
 	default:
 		if s.Error != "" {
 			fmt.Fprintf(b, "[%s] %s %s %s err='%s' %2s", console.Colorize("RespStatus", strings.ToUpper(s.trcType.String())), console.Colorize("FuncName", s.FuncName),
@@ -497,10 +708,15 @@ func (s shortTraceMsg) String() string {
 				console.Colorize("ErrStatus", s.Error),
 				console.Colorize("HeaderValue", s.Duration))
 		} else {
-			fmt.Fprintf(b, "[%s] %s %s %s %2s", console.Colorize("RespStatus", strings.ToUpper(s.trcType.String())), console.Colorize("FuncName", s.FuncName),
+			sz := ""
+			if s.Size != 0 {
+				sz = fmt.Sprintf(" %s", humanize.IBytes(uint64(s.Size)))
+			}
+			fmt.Fprintf(b, "[%s] %s %s %s %2s%s", console.Colorize("RespStatus", strings.ToUpper(s.trcType.String())), console.Colorize("FuncName", s.FuncName),
 				hostStr,
 				s.Path,
-				console.Colorize("HeaderValue", s.Duration))
+				console.Colorize("HeaderValue", s.Duration),
+				sz)
 		}
 		return b.String()
 	}
@@ -522,8 +738,12 @@ func (s shortTraceMsg) String() string {
 
 	spaces := 15 - len(s.Client)
 	fmt.Fprintf(b, "%*s", spaces, " ")
-	fmt.Fprint(b, console.Colorize("HeaderValue", fmt.Sprintf("  %2s", s.CallStats.Duration.Round(time.Microsecond))))
+	fmt.Fprint(b, console.Colorize("HeaderValue", fmt.Sprintf(" %2s", s.CallStats.Duration.Round(time.Microsecond))))
 	spaces = 12 - len(fmt.Sprintf("%2s", s.CallStats.Duration.Round(time.Microsecond)))
+	fmt.Fprintf(b, "%*s", spaces, " ")
+	fmt.Fprint(b, console.Colorize("Stat", " ⇣ "))
+	fmt.Fprint(b, console.Colorize("HeaderValue", fmt.Sprintf(" %2s", s.CallStats.TTFB.Round(time.Nanosecond))))
+	spaces = 10 - len(fmt.Sprintf("%2s", s.CallStats.TTFB.Round(time.Nanosecond)))
 	fmt.Fprintf(b, "%*s", spaces, " ")
 	fmt.Fprint(b, console.Colorize("Stat", " ↑ "))
 	fmt.Fprint(b, console.Colorize("HeaderValue", humanize.IBytes(uint64(s.CallStats.Rx))))
@@ -543,8 +763,6 @@ func colorizedNodeName(nodeName string) string {
 }
 
 func (t traceMessage) JSON() string {
-	t.Status = "success"
-
 	trc := verboseTrace{
 		trcType:    t.Trace.TraceType,
 		Type:       t.Trace.TraceType.String(),
@@ -556,6 +774,7 @@ func (t traceMessage) JSON() string {
 		Error:      t.Trace.Error,
 		HealResult: t.Trace.HealResult,
 		Message:    t.Trace.Message,
+		Extra:      t.Trace.Custom,
 	}
 
 	if t.Trace.HTTP != nil {
@@ -592,7 +811,7 @@ func (t traceMessage) JSON() string {
 			Duration: t.Trace.Duration,
 			Rx:       t.Trace.HTTP.CallStats.InputBytes,
 			Tx:       t.Trace.HTTP.CallStats.OutputBytes,
-			Ttfb:     t.Trace.HTTP.CallStats.TimeToFirstByte,
+			TTFB:     t.Trace.HTTP.CallStats.TimeToFirstByte,
 		}
 	}
 	buf := &bytes.Buffer{}
@@ -614,17 +833,30 @@ func (t traceMessage) String() string {
 	if trc.NodeName != "" {
 		nodeNameStr = fmt.Sprintf("%s ", colorizedNodeName(trc.NodeName))
 	}
-
+	extra := ""
+	if len(t.Trace.Custom) > 0 {
+		for k, v := range t.Trace.Custom {
+			extra = fmt.Sprintf("%s %s=%s", extra, k, v)
+		}
+		extra = console.Colorize("Extra", extra)
+	}
 	switch trc.TraceType {
 	case madmin.TraceS3, madmin.TraceInternal:
 		if trc.HTTP == nil {
 			return ""
 		}
+	case madmin.TraceBootstrap:
+		fmt.Fprintf(b, "%s %s [%s] %s%s", nodeNameStr, console.Colorize("Request", fmt.Sprintf("[%s %s]", strings.ToUpper(trc.TraceType.String()), trc.FuncName)), trc.Time.Local().Format(traceTimeFormat), trc.Message, extra)
+		return b.String()
 	default:
+		sz := ""
+		if trc.Bytes != 0 {
+			sz = fmt.Sprintf(" %s", humanize.IBytes(uint64(trc.Bytes)))
+		}
 		if trc.Error != "" {
-			fmt.Fprintf(b, "%s %s [%s] %s err='%s' %s", nodeNameStr, console.Colorize("Request", fmt.Sprintf("[%s %s]", strings.ToUpper(trc.TraceType.String()), trc.FuncName)), trc.Time.Local().Format(traceTimeFormat), trc.Path, console.Colorize("ErrStatus", trc.Error), trc.Duration)
+			fmt.Fprintf(b, "%s %s [%s] %s%s err='%s' %s%s", nodeNameStr, console.Colorize("Request", fmt.Sprintf("[%s %s]", strings.ToUpper(trc.TraceType.String()), trc.FuncName)), trc.Time.Local().Format(traceTimeFormat), trc.Path, extra, console.Colorize("ErrStatus", trc.Error), trc.Duration, sz)
 		} else {
-			fmt.Fprintf(b, "%s %s [%s] %s %s", nodeNameStr, console.Colorize("Request", fmt.Sprintf("[%s %s]", strings.ToUpper(trc.TraceType.String()), trc.FuncName)), trc.Time.Local().Format(traceTimeFormat), trc.Path, trc.Duration)
+			fmt.Fprintf(b, "%s %s [%s] %s%s %s%s", nodeNameStr, console.Colorize("Request", fmt.Sprintf("[%s %s]", strings.ToUpper(trc.TraceType.String()), trc.FuncName)), trc.Time.Local().Format(traceTimeFormat), trc.Path, extra, trc.Duration, sz)
 		}
 		return b.String()
 	}
@@ -653,7 +885,8 @@ func (t traceMessage) String() string {
 	fmt.Fprintf(b, "%s%s", nodeNameStr, console.Colorize("Body", fmt.Sprintf("%s\n", string(ri.Body))))
 	fmt.Fprintf(b, "%s%s", nodeNameStr, console.Colorize("Response", "[RESPONSE] "))
 	fmt.Fprintf(b, "[%s] ", rs.Time.Local().Format(traceTimeFormat))
-	fmt.Fprint(b, console.Colorize("Stat", fmt.Sprintf("[ Duration %2s  ↑ %s  ↓ %s ]\n", trc.HTTP.CallStats.Latency.Round(time.Microsecond), humanize.IBytes(uint64(trc.HTTP.CallStats.InputBytes)), humanize.IBytes(uint64(trc.HTTP.CallStats.OutputBytes)))))
+	fmt.Fprint(b, console.Colorize("Stat", fmt.Sprintf("[ Duration %2s TTFB %2s ↑ %s  ↓ %s ]\n", trc.Duration.Round(time.Microsecond), trc.HTTP.CallStats.TimeToFirstByte.Round(time.Nanosecond),
+		humanize.IBytes(uint64(trc.HTTP.CallStats.InputBytes)), humanize.IBytes(uint64(trc.HTTP.CallStats.OutputBytes)))))
 
 	statusStr := console.Colorize("RespStatus", fmt.Sprintf("%d %s", rs.StatusCode, http.StatusText(rs.StatusCode)))
 	if rs.StatusCode != http.StatusOK {
@@ -665,7 +898,307 @@ func (t traceMessage) String() string {
 		fmt.Fprintf(b, "%s%s", nodeNameStr, console.Colorize("RespHeaderKey",
 			fmt.Sprintf("%s: ", k))+console.Colorize("HeaderValue", fmt.Sprintf("%s\n", strings.Join(v, ","))))
 	}
+	if len(extra) > 0 {
+		fmt.Fprintf(b, "%s%s\n", nodeNameStr, extra)
+	}
 	fmt.Fprintf(b, "%s%s\n", nodeNameStr, console.Colorize("Body", string(rs.Body)))
 	fmt.Fprint(b, nodeNameStr)
 	return b.String()
+}
+
+type statItem struct {
+	Name           string
+	Count          int           `json:"count"`
+	Duration       time.Duration `json:"duration"`
+	Errors         int           `json:"errors,omitempty"`
+	CallStatsCount int           `json:"callStatsCount,omitempty"`
+	CallStats      callStats     `json:"callStats,omitempty"`
+	TTFB           time.Duration `json:"ttfb,omitempty"`
+	MaxTTFB        time.Duration `json:"maxTTFB,omitempty"`
+	MaxDur         time.Duration `json:"maxDuration"`
+	MinDur         time.Duration `json:"minDuration"`
+	Size           int64         `json:"size"`
+}
+
+type statTrace struct {
+	Calls   map[string]statItem `json:"calls"`
+	Started time.Time
+	mu      sync.Mutex
+}
+
+func (s *statTrace) JSON() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	buf := &bytes.Buffer{}
+	enc := json.NewEncoder(buf)
+	enc.SetIndent("", " ")
+	// Disable escaping special chars to display XML tags correctly
+	enc.SetEscapeHTML(false)
+	fatalIf(probe.NewError(enc.Encode(s)), "Unable to marshal into JSON.")
+
+	// strip off extra newline added by json encoder
+	return strings.TrimSuffix(buf.String(), "\n")
+}
+
+func (s *statTrace) String() string {
+	return ""
+}
+
+func (s *statTrace) add(t madmin.ServiceTraceInfo) {
+	id := t.Trace.FuncName
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	got := s.Calls[id]
+	if got.Name == "" {
+		got.Name = id
+	}
+	if got.MaxDur < t.Trace.Duration {
+		got.MaxDur = t.Trace.Duration
+	}
+	if got.MinDur <= 0 {
+		got.MinDur = t.Trace.Duration
+	}
+	if got.MinDur > t.Trace.Duration {
+		got.MinDur = t.Trace.Duration
+	}
+	got.Count++
+	got.Duration += t.Trace.Duration
+	if t.Trace.Error != "" {
+		got.Errors++
+	}
+	got.Size += t.Trace.Bytes
+	if t.Trace.HTTP != nil {
+		got.CallStatsCount++
+		got.CallStats.Rx += t.Trace.HTTP.CallStats.InputBytes
+		got.CallStats.Tx += t.Trace.HTTP.CallStats.OutputBytes
+		got.TTFB += t.Trace.HTTP.CallStats.TimeToFirstByte
+		if got.MaxTTFB < t.Trace.HTTP.CallStats.TimeToFirstByte {
+			got.MaxTTFB = t.Trace.HTTP.CallStats.TimeToFirstByte
+		}
+	}
+	s.Calls[id] = got
+}
+
+func initTraceStatsUI(maxEntries int, traces <-chan madmin.ServiceTraceInfo) *traceStatsUI {
+	s := spinner.New()
+	s.Spinner = spinner.Points
+	s.Spinner.FPS = time.Second / 2
+	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
+	console.SetColor("metrics-duration", color.New(color.FgWhite))
+	console.SetColor("metrics-size", color.New(color.FgGreen))
+	console.SetColor("metrics-dur", color.New(color.FgGreen))
+	console.SetColor("metrics-dur-med", color.New(color.FgYellow))
+	console.SetColor("metrics-dur-high", color.New(color.FgRed))
+	console.SetColor("metrics-error", color.New(color.FgYellow))
+	console.SetColor("metrics-title", color.New(color.FgCyan))
+	console.SetColor("metrics-top-title", color.New(color.FgHiCyan))
+	console.SetColor("metrics-number", color.New(color.FgWhite))
+	console.SetColor("metrics-number-secondary", color.New(color.FgBlue))
+	console.SetColor("metrics-zero", color.New(color.FgWhite))
+	stats := &statTrace{Calls: make(map[string]statItem, 20), Started: time.Now()}
+	go func() {
+		for t := range traces {
+			stats.add(t)
+		}
+	}()
+	return &traceStatsUI{
+		started:    time.Now(),
+		spinner:    s,
+		maxEntries: maxEntries,
+		current:    stats,
+	}
+}
+
+type traceStatsUI struct {
+	current    *statTrace
+	started    time.Time
+	spinner    spinner.Model
+	quitting   bool
+	maxEntries int
+}
+
+func (m *traceStatsUI) Init() tea.Cmd {
+	return m.spinner.Tick
+}
+
+func (m *traceStatsUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.quitting {
+		return m, tea.Quit
+	}
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "q", "esc", "ctrl+c":
+			m.quitting = true
+			return m, tea.Quit
+		default:
+			return m, nil
+		}
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
+	}
+	return m, nil
+}
+
+func (m *traceStatsUI) View() string {
+	var s strings.Builder
+
+	s.WriteString(fmt.Sprintf("%s %s\n",
+		console.Colorize("metrics-top-title", "Duration: "+time.Since(m.current.Started).Round(time.Second).String()), m.spinner.View()))
+
+	// Set table header - akin to k8s style
+	// https://github.com/olekukonko/tablewriter#example-10---set-nowhitespace-and-tablepadding-option
+	table := tablewriter.NewWriter(&s)
+	table.SetAutoWrapText(false)
+	table.SetAutoFormatHeaders(true)
+	table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
+	table.SetAlignment(tablewriter.ALIGN_LEFT)
+	table.SetCenterSeparator("")
+	table.SetColumnSeparator("")
+	table.SetRowSeparator("")
+	table.SetHeaderLine(false)
+	table.SetBorder(false)
+	table.SetTablePadding("  ") // pad with tabs
+	table.SetNoWhiteSpace(true)
+	var entries []statItem
+	m.current.mu.Lock()
+	totalCnt := 0
+	dur := time.Since(m.current.Started)
+	for _, v := range m.current.Calls {
+		totalCnt += v.Count
+		entries = append(entries, v)
+	}
+	m.current.mu.Unlock()
+	if len(entries) == 0 {
+		s.WriteString("(waiting for data)")
+		return s.String()
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Count == entries[j].Count {
+			return entries[i].Name < entries[j].Name
+		}
+		return entries[i].Count > entries[j].Count
+	})
+	if m.maxEntries > 0 && len(entries) > m.maxEntries {
+		entries = entries[:m.maxEntries]
+	}
+	hasTTFB := false
+	for _, e := range entries {
+		if e.TTFB > 0 {
+			hasTTFB = true
+			break
+		}
+	}
+	t := []string{
+		console.Colorize("metrics-top-title", "Call"),
+		console.Colorize("metrics-top-title", "Count"),
+		console.Colorize("metrics-top-title", "RPM"),
+		console.Colorize("metrics-top-title", "Avg Time"),
+		console.Colorize("metrics-top-title", "Min Time"),
+		console.Colorize("metrics-top-title", "Max Time"),
+	}
+	if hasTTFB {
+		t = append(t,
+			console.Colorize("metrics-top-title", "Avg TTFB"),
+			console.Colorize("metrics-top-title", "Max TTFB"),
+		)
+	}
+	t = append(t,
+		console.Colorize("metrics-top-title", "Avg Size"),
+		console.Colorize("metrics-top-title", "Rate"),
+		console.Colorize("metrics-top-title", "Errors"),
+	)
+
+	table.Append(t)
+	for _, v := range entries {
+		if v.Count <= 0 {
+			continue
+		}
+		errs := "0"
+		if v.Errors > 0 {
+			errs = console.Colorize("metrics-error", strconv.Itoa(v.Errors))
+		}
+		avg := v.Duration / time.Duration(v.Count)
+		avgTTFB := v.TTFB / time.Duration(v.Count)
+		avgColor := "metrics-dur"
+		if avg > 10*time.Second {
+			avgColor = "metrics-dur-high"
+		} else if avg > time.Second {
+			avgColor = "metrics-dur-med"
+		}
+
+		minColor := "metrics-dur"
+		if v.MinDur > 10*time.Second {
+			minColor = "metrics-dur-high"
+		} else if v.MinDur > time.Second {
+			minColor = "metrics-dur-med"
+		}
+
+		maxColor := "metrics-dur"
+		if v.MaxDur > 10*time.Second {
+			maxColor = "metrics-dur-high"
+		} else if v.MaxDur > time.Second {
+			maxColor = "metrics-dur-med"
+		}
+
+		sz := "-"
+		rate := "-"
+		if v.Size > 0 && v.Count > 0 {
+			sz = humanize.IBytes(uint64(v.Size) / uint64(v.Count))
+			rate = fmt.Sprintf("%s/m", humanize.IBytes(uint64(float64(v.Size)/dur.Minutes())))
+		}
+		if v.CallStatsCount > 0 {
+			var s, r []string
+			if v.CallStats.Rx > 0 {
+				s = append(s, fmt.Sprintf("↓ %s", humanize.IBytes(uint64(v.CallStats.Rx/v.CallStatsCount))))
+				r = append(r, fmt.Sprintf("↓ %s", humanize.IBytes(uint64(float64(v.CallStats.Rx)/dur.Minutes()))))
+			}
+			if v.CallStats.Tx > 0 {
+				s = append(s, fmt.Sprintf("↑ %s", humanize.IBytes(uint64(v.CallStats.Tx/v.CallStatsCount))))
+				r = append(r, fmt.Sprintf("↑ %s", humanize.IBytes(uint64(float64(v.CallStats.Tx)/dur.Minutes()))))
+			}
+			if len(s) > 0 {
+				sz = strings.Join(s, " ")
+				rate = strings.Join(r, " ") + "/m"
+			}
+		}
+		if sz != "-" {
+			sz = console.Colorize("metrics-size", sz)
+			rate = console.Colorize("metrics-size", rate)
+		}
+
+		t := []string{
+			console.Colorize("metrics-title", metricsTitle(v.Name)),
+			console.Colorize("metrics-number", fmt.Sprintf("%d ", v.Count)) +
+				console.Colorize("metrics-number-secondary", fmt.Sprintf("(%0.1f%%)", float64(v.Count)/float64(totalCnt)*100)),
+			console.Colorize("metrics-number", fmt.Sprintf("%0.1f", float64(v.Count)/dur.Minutes())),
+			console.Colorize(avgColor, fmt.Sprintf("%v", avg.Round(time.Microsecond))),
+			console.Colorize(minColor, v.MinDur),
+			console.Colorize(maxColor, v.MaxDur),
+		}
+		if hasTTFB {
+			t = append(t,
+				console.Colorize(avgColor, fmt.Sprintf("%v", avgTTFB.Round(time.Microsecond))),
+				console.Colorize(maxColor, v.MaxTTFB))
+		}
+		t = append(t, sz,
+			rate,
+			errs)
+		table.Append(t)
+	}
+	table.Render()
+	if globalTermWidth <= 10 {
+		return s.String()
+	}
+	w := globalTermWidth
+	if nw, _, e := term.GetSize(int(os.Stdout.Fd())); e == nil {
+		w = nw
+	}
+	split := strings.Split(s.String(), "\n")
+	for i, line := range split {
+		split[i] = truncate.StringWithTail(line, uint(w), "»")
+	}
+	return strings.Join(split, "\n")
 }

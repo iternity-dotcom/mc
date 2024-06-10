@@ -18,16 +18,16 @@
 package cmd
 
 import (
+	"errors"
 	"io"
-	"io/ioutil"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/minio/cli"
 	json "github.com/minio/colorjson"
+	"github.com/minio/madmin-go/v3"
 	"github.com/minio/mc/pkg/probe"
-	dto "github.com/prometheus/client_model/go"
-	prom2json "github.com/prometheus/prom2json"
 )
 
 var adminPrometheusMetricsCmd = cli.Command{
@@ -40,24 +40,34 @@ var adminPrometheusMetricsCmd = cli.Command{
 	CustomHelpTemplate: `NAME:
   {{.HelpName}} - {{.Usage}}
 USAGE:
-  {{.HelpName}} TARGET
+  {{.HelpName}} TARGET [METRIC-TYPE]
+
+METRIC-TYPE:
+  valid values are ['cluster', 'node', 'bucket', 'resource']. Defaults to 'cluster' if not specified.
+
 FLAGS:
   {{range .VisibleFlags}}{{.}}
   {{end}}
 EXAMPLES:
   1. List of metrics reported cluster wide.
      {{.Prompt}} {{.HelpName}} play
+
+  2. List of metrics reported at node level.
+     {{.Prompt}} {{.HelpName}} play node
+
+  3. List of metrics reported at bucket level.
+     {{.Prompt}} {{.HelpName}} play bucket
+
+  4. List of resource metrics.
+     {{.Prompt}} {{.HelpName}} play resource
 `,
 }
 
-const (
-	metricsRespBodyLimit = 10 << 20 // 10 MiB
-	metricsEndPoint      = "/minio/v2/metrics/cluster"
-)
+const metricsEndPointRoot = "/minio/v2/metrics/"
 
 // checkSupportMetricsSyntax - validate arguments passed by a user
 func checkSupportMetricsSyntax(ctx *cli.Context) {
-	if len(ctx.Args()) == 0 || len(ctx.Args()) > 1 {
+	if len(ctx.Args()) == 0 || len(ctx.Args()) > 2 {
 		showCommandHelpAndExit(ctx, 1) // last argument is exit code
 	}
 }
@@ -80,13 +90,25 @@ func printPrometheusMetrics(ctx *cli.Context) error {
 	if e != nil {
 		return e
 	}
+	metricsSubSystem := args.Get(1)
+	switch metricsSubSystem {
+	case "node", "bucket", "cluster", "resource":
+	case "":
+		metricsSubSystem = "cluster"
+	default:
+		fatalIf(errInvalidArgument().Trace(), "invalid metric type '%v'", metricsSubSystem)
+	}
 
-	req, e := http.NewRequest(http.MethodGet, hostConfig.URL+metricsEndPoint, nil)
+	req, e := http.NewRequest(http.MethodGet, hostConfig.URL+metricsEndPointRoot+metricsSubSystem, nil)
 	if e != nil {
 		return e
 	}
-	req.Header.Add("Authorization", "Bearer "+token)
-	client := httpClient(10 * time.Second)
+
+	if token != "" {
+		req.Header.Add("Authorization", "Bearer "+token)
+	}
+
+	client := httpClient(60 * time.Second)
 	resp, e := client.Do(req)
 	if e != nil {
 		return e
@@ -95,35 +117,30 @@ func printPrometheusMetrics(ctx *cli.Context) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusOK {
-		printMsg(prometheusMetricsReader{Reader: io.LimitReader(resp.Body, metricsRespBodyLimit)})
+		printMsg(prometheusMetricsReader{Reader: resp.Body})
+		return nil
 	}
-	return nil
+
+	return errors.New(resp.Status)
 }
 
 // JSON returns jsonified message
 func (pm prometheusMetricsReader) JSON() string {
-	mfChan := make(chan *dto.MetricFamily)
-	go func() {
-		if err := prom2json.ParseReader(pm.Reader, mfChan); err != nil {
-			fatalIf(probe.NewError(err), "error reading metrics:")
-		}
-	}()
-	result := []*prom2json.Family{}
-	for mf := range mfChan {
-		result = append(result, prom2json.NewFamily(mf))
-	}
-	jsonMessageBytes, e := json.MarshalIndent(result, "", " ")
+	results, e := madmin.ParsePrometheusResults(pm.Reader)
+	fatalIf(probe.NewError(e), "Unable to parse Prometheus metrics.")
+
+	jsonMessageBytes, e := json.MarshalIndent(results, "", " ")
 	fatalIf(probe.NewError(e), "Unable to marshal into JSON.")
 	return string(jsonMessageBytes)
 }
 
 // String - returns the string representation of the prometheus metrics
 func (pm prometheusMetricsReader) String() string {
-	respBytes, e := ioutil.ReadAll(pm.Reader)
-	if e != nil {
-		fatalIf(probe.NewError(e), "error reading metrics:")
-	}
-	return string(respBytes)
+	_, e := io.Copy(os.Stdout, pm.Reader)
+
+	fatalIf(probe.NewError(e), "Unable to read Prometheus metrics.")
+
+	return ""
 }
 
 // prometheusMetricsReader mirrors the MetricFamily proto message.
@@ -133,8 +150,8 @@ type prometheusMetricsReader struct {
 
 func mainSupportMetrics(ctx *cli.Context) error {
 	checkSupportMetricsSyntax(ctx)
-	if err := printPrometheusMetrics(ctx); err != nil {
-		fatalIf(probe.NewError(err), "Error in listing prometheus metrics")
-	}
+
+	fatalIf(probe.NewError(printPrometheusMetrics(ctx)), "Unable to list prometheus metrics.")
+
 	return nil
 }

@@ -23,11 +23,10 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	humanize "github.com/dustin/go-humanize"
+	"github.com/dustin/go-humanize"
 	"github.com/minio/cli"
-	"github.com/minio/madmin-go"
+	"github.com/minio/madmin-go/v3"
 	"github.com/minio/mc/pkg/probe"
-	"github.com/minio/pkg/console"
 )
 
 var adminSpeedtestCmd = cli.Command{
@@ -41,8 +40,8 @@ var adminSpeedtestCmd = cli.Command{
 	CustomHelpTemplate: "Please use 'mc support perf'",
 }
 
-func mainAdminSpeedtest(ctx *cli.Context) error {
-	console.Infoln("Please use 'mc support perf'")
+func mainAdminSpeedtest(_ *cli.Context) error {
+	deprecatedError("mc support perf")
 	return nil
 }
 
@@ -70,8 +69,8 @@ func mainAdminSpeedTestObject(ctx *cli.Context, aliasedURL string, outCh chan<- 
 		fatalIf(probe.NewError(e), "Unable to parse object size")
 		return nil
 	}
-	if size < 0 {
-		fatalIf(errInvalidArgument(), "size is expected to be atleast 0 bytes")
+	if size <= 0 {
+		fatalIf(errInvalidArgument(), "size is expected to be more than 0 bytes")
 		return nil
 	}
 	concurrent := ctx.Int("concurrent")
@@ -91,6 +90,7 @@ func mainAdminSpeedTestObject(ctx *cli.Context, aliasedURL string, outCh chan<- 
 		Concurrency: concurrent,
 		Autotune:    autotune,
 		Bucket:      ctx.String("bucket"), // This is a hidden flag.
+		NoClear:     ctx.Bool("noclear"),
 	})
 
 	if globalJSON {
@@ -123,7 +123,7 @@ func mainAdminSpeedTestObject(ctx *cli.Context, aliasedURL string, outCh chan<- 
 
 	p := tea.NewProgram(initSpeedTestUI())
 	go func() {
-		if e := p.Start(); e != nil {
+		if _, e := p.Run(); e != nil {
 			os.Exit(1)
 		}
 		close(done)

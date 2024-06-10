@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -13,8 +12,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/dustin/go-humanize"
 	"github.com/minio/cli"
-	"github.com/minio/madmin-go"
+	"github.com/minio/madmin-go/v3"
 	"github.com/minio/mc/pkg/probe"
+	"github.com/minio/pkg/v3/console"
 	"github.com/olekukonko/tablewriter"
 )
 
@@ -61,46 +61,59 @@ func mainBatchStatus(ctx *cli.Context) error {
 	ctxt, cancel := context.WithCancel(globalContext)
 	defer cancel()
 
-	done := make(chan struct{})
-
 	_, e := client.DescribeBatchJob(ctxt, jobID)
+	nosuchJob := madmin.ToErrorResponse(e).Code == "XMinioAdminNoSuchJob"
+	if nosuchJob {
+		e = nil
+		if !globalJSON {
+			console.Infoln("Unable to find an active job, attempting to list from previously run jobs")
+		}
+	}
 	fatalIf(probe.NewError(e), "Unable to lookup job status")
 
 	ui := tea.NewProgram(initBatchJobMetricsUI(jobID))
-	if !globalJSON {
-		go func() {
-			if e := ui.Start(); e != nil {
-				cancel()
-				os.Exit(1)
-			}
-			close(done)
-		}()
-	}
-
 	go func() {
 		opts := madmin.MetricsOptions{
-			Type:    madmin.MetricsBatchJobs,
-			ByJobID: jobID,
+			Type:     madmin.MetricsBatchJobs,
+			ByJobID:  jobID,
+			Interval: time.Second,
 		}
 		e := client.Metrics(ctxt, opts, func(metrics madmin.RealtimeMetrics) {
 			if globalJSON {
-				printMsg(metricsMessage{RealtimeMetrics: metrics})
-				return
-			}
-			if metrics.Aggregated.BatchJobs != nil {
-				job := metrics.Aggregated.BatchJobs.Jobs[jobID]
-				ui.Send(job)
-				if job.Complete {
+				if metrics.Aggregated.BatchJobs == nil {
 					cancel()
+					return
 				}
+
+				job, ok := metrics.Aggregated.BatchJobs.Jobs[jobID]
+				if !ok {
+					cancel()
+					return
+				}
+
+				printMsg(metricsMessage{RealtimeMetrics: metrics})
+				if job.Complete || job.Failed {
+					cancel()
+					return
+				}
+			} else {
+				ui.Send(metrics)
 			}
 		})
 		if e != nil && !errors.Is(e, context.Canceled) {
-			fatalIf(probe.NewError(e).Trace(ctx.Args()...), "Unable to get current status")
+			fatalIf(probe.NewError(e).Trace(ctx.Args()...), "Unable to get current batch status")
 		}
 	}()
 
-	<-done
+	if !globalJSON {
+		if _, e := ui.Run(); e != nil {
+			cancel()
+			fatalIf(probe.NewError(e).Trace(aliasedURL), "Unable to get current batch status")
+		}
+	} else {
+		<-ctxt.Done()
+	}
+
 	return nil
 }
 
@@ -135,9 +148,21 @@ func (m *batchJobMetricsUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 			return m, nil
 		}
-	case madmin.JobMetric:
-		m.current = msg
-		if msg.Complete {
+	case madmin.RealtimeMetrics:
+		metrics := msg
+		if metrics.Aggregated.BatchJobs == nil {
+			m.quitting = true
+			return m, tea.Quit
+		}
+
+		job, ok := metrics.Aggregated.BatchJobs.Jobs[m.jobID]
+		if !ok {
+			m.quitting = true
+			return m, tea.Quit
+		}
+
+		m.current = job
+		if job.Complete || job.Failed {
 			m.quitting = true
 			return m, tea.Quit
 		}
@@ -180,11 +205,9 @@ func (m *batchJobMetricsUI) View() string {
 		s.WriteString(m.spinner.View())
 	} else {
 		if m.current.Complete {
-			if m.current.Replicate.ObjectsFailed == 0 {
-				s.WriteString(m.spinner.Style.Render((tickCell + tickCell + tickCell)))
-			} else {
-				s.WriteString(m.spinner.Style.Render((crossTickCell + crossTickCell + crossTickCell)))
-			}
+			s.WriteString(m.spinner.Style.Render((tickCell + tickCell + tickCell)))
+		} else if m.current.Failed {
+			s.WriteString(m.spinner.Style.Render((crossTickCell + crossTickCell + crossTickCell)))
 		}
 	}
 	s.WriteString("\n")
@@ -198,14 +221,25 @@ func (m *batchJobMetricsUI) View() string {
 		addLine("Versions: ", m.current.Replicate.Objects)
 		addLine("FailedObjects: ", m.current.Replicate.ObjectsFailed)
 		if accElapsedTime > 0 {
-			bytesTransferredPerSec := float64(int64(time.Second)*m.current.Replicate.BytesTransferred) / float64(accElapsedTime)
+			bytesTransferredPerSec := float64(m.current.Replicate.BytesTransferred) / accElapsedTime.Seconds()
 			objectsPerSec := float64(int64(time.Second)*m.current.Replicate.Objects) / float64(accElapsedTime)
 			addLine("Throughput: ", fmt.Sprintf("%s/s", humanize.IBytes(uint64(bytesTransferredPerSec))))
 			addLine("IOPs: ", fmt.Sprintf("%.2f objs/s", objectsPerSec))
 		}
-		addLine("Transferred: ", fmt.Sprintf("%s", humanize.IBytes(uint64(m.current.Replicate.BytesTransferred))))
-		addLine("Elapsed: ", fmt.Sprintf("%s", accElapsedTime))
+		addLine("Transferred: ", humanize.IBytes(uint64(m.current.Replicate.BytesTransferred)))
+		addLine("Elapsed: ", accElapsedTime.String())
 		addLine("CurrObjName: ", m.current.Replicate.Object)
+	case string(madmin.BatchJobExpire):
+		addLine("JobType: ", m.current.JobType)
+		addLine("Objects: ", m.current.Expired.Objects)
+		addLine("FailedObjects: ", m.current.Expired.ObjectsFailed)
+		addLine("CurrObjName: ", m.current.Expired.Object)
+
+		if !m.current.LastUpdate.IsZero() {
+			accElapsedTime := m.current.LastUpdate.Sub(m.current.StartTime)
+			addLine("Elapsed: ", accElapsedTime.String())
+		}
+
 	}
 
 	table.AppendBulk(data)

@@ -23,7 +23,6 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
-	"crypto/elliptic"
 	"crypto/rsa"
 	"crypto/sha1"
 	"crypto/sha256"
@@ -60,7 +59,11 @@ func marshalPublicKey(pub interface{}) (publicKeyBytes []byte, e error) {
 			return nil, e
 		}
 	case *ecdsa.PublicKey:
-		publicKeyBytes = elliptic.Marshal(pub.Curve, pub.X, pub.Y)
+		pubKey, e := pub.ECDH()
+		if e != nil {
+			return nil, e
+		}
+		publicKeyBytes = pubKey.Bytes()
 	case ed25519.PublicKey:
 		publicKeyBytes = pub
 	default:
@@ -102,7 +105,7 @@ func promptTrustSelfSignedCert(ctx context.Context, endpoint, alias string) (*x5
 		return nil, nil
 	}
 
-	if te != nil && !strings.Contains(te.Error(), "certificate signed by unknown authority") &&
+	if !strings.Contains(te.Error(), "certificate signed by unknown authority") &&
 		!strings.Contains(te.Error(), "certificate is not trusted") /* darwin specific error message */ {
 		return nil, probe.NewError(te)
 	}
@@ -158,9 +161,9 @@ func promptTrustSelfSignedCert(ctx context.Context, endpoint, alias string) (*x5
 // fetchPeerCertificate uses the given transport to fetch the peer
 // certificate from the given endpoint.
 func fetchPeerCertificate(ctx context.Context, endpoint string) (*x509.Certificate, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, err
+	req, e := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if e != nil {
+		return nil, e
 	}
 	client := http.Client{
 		Transport: &http.Transport{
@@ -169,9 +172,9 @@ func fetchPeerCertificate(ctx context.Context, endpoint string) (*x509.Certifica
 			},
 		},
 	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
+	resp, e := client.Do(req)
+	if e != nil {
+		return nil, e
 	}
 	if resp.TLS == nil || len(resp.TLS.PeerCertificates) == 0 {
 		return nil, fmt.Errorf("Unable to read remote TLS certificate")

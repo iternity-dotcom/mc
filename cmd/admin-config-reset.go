@@ -25,7 +25,7 @@ import (
 	"github.com/minio/cli"
 	json "github.com/minio/colorjson"
 	"github.com/minio/mc/pkg/probe"
-	"github.com/minio/pkg/console"
+	"github.com/minio/pkg/v3/console"
 )
 
 var adminConfigEnvFlags = []cli.Flag{
@@ -65,17 +65,18 @@ EXAMPLES:
 type configResetMessage struct {
 	Status      string `json:"status"`
 	targetAlias string
+	key         string
 	restart     bool
 }
 
 // String colorized service status message.
 func (u configResetMessage) String() (msg string) {
 	msg += console.Colorize("ResetConfigSuccess",
-		"Key is successfully reset.\n")
-	suggestion := fmt.Sprintf("mc admin service restart %s", u.targetAlias)
+		fmt.Sprintf("'%s' is successfully reset.", u.key))
 	if u.restart {
+		suggestion := fmt.Sprintf("mc admin service restart %s", u.targetAlias)
 		msg += console.Colorize("ResetConfigSuccess",
-			fmt.Sprintf("Please restart your server with `%s`.\n", suggestion))
+			fmt.Sprintf("\nPlease restart your server with `%s`.", suggestion))
 	}
 	return
 }
@@ -144,6 +145,7 @@ func mainAdminConfigReset(ctx *cli.Context) error {
 	printMsg(configResetMessage{
 		targetAlias: aliasedURL,
 		restart:     restart,
+		key:         input,
 	})
 
 	return nil

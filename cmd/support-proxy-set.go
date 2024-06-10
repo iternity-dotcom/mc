@@ -22,7 +22,7 @@ import (
 
 	"github.com/minio/cli"
 	"github.com/minio/mc/pkg/probe"
-	"github.com/minio/pkg/console"
+	"github.com/minio/pkg/v3/console"
 )
 
 type supportProxySetMessage struct {
@@ -47,7 +47,7 @@ var supportProxySetCmd = cli.Command{
 	Action:          mainSupportProxySet,
 	OnUsageError:    onUsageError,
 	Before:          setGlobalsFromContext,
-	Flags:           supportGlobalFlags,
+	Flags:           globalFlags,
 	HideHelpCommand: true,
 	CustomHelpTemplate: `NAME:
   {{.HelpName}} - {{.Usage}}
@@ -80,7 +80,8 @@ func mainSupportProxySet(ctx *cli.Context) error {
 	args := ctx.Args()
 	aliasedURL := args.Get(0)
 	alias, _ := url2Alias(aliasedURL)
-	validateClusterRegistered(alias, true)
+
+	validateClusterRegistered(alias, false)
 
 	// Create a new MinIO Admin Client
 	client := getClient(aliasedURL)

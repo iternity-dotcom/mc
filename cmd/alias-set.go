@@ -34,8 +34,7 @@ import (
 	"github.com/minio/cli"
 	"github.com/minio/mc/pkg/probe"
 	"github.com/minio/minio-go/v7"
-	"github.com/minio/pkg/console"
-	"golang.org/x/crypto/ssh/terminal"
+	"github.com/minio/pkg/v3/console"
 	"golang.org/x/term"
 )
 
@@ -101,7 +100,7 @@ EXAMPLES:
 }
 
 // checkAliasSetSyntax - verifies input arguments to 'alias set'.
-func checkAliasSetSyntax(ctx *cli.Context, accessKey string, secretKey string, deprecated bool) {
+func checkAliasSetSyntax(ctx *cli.Context, accessKey, secretKey string, deprecated bool) {
 	args := ctx.Args()
 	argsNr := len(args)
 
@@ -180,7 +179,7 @@ func setAlias(alias string, aliasCfgV10 aliasConfigV10) aliasMessage {
 // probeS3Signature - auto probe S3 server signature: issue a Stat call
 // using v4 signature then v2 in case of failure.
 func probeS3Signature(ctx context.Context, accessKey, secretKey, url string, peerCert *x509.Certificate) (string, *probe.Error) {
-	probeBucketName := randString(60, rand.NewSource(time.Now().UnixNano()), "probe-bucket-sign-")
+	probeBucketName := randString(60, rand.NewSource(time.Now().UnixNano()), "probe-bsign-")
 	// Test s3 connection for API auto probe
 	s3Config := &Config{
 		// S3 connection parameters
@@ -191,6 +190,8 @@ func probeS3Signature(ctx context.Context, accessKey, secretKey, url string, pee
 		Debug:             globalDebug,
 		ConnReadDeadline:  globalConnReadDeadline,
 		ConnWriteDeadline: globalConnWriteDeadline,
+		UploadLimit:       int64(globalLimitUpload),
+		DownloadLimit:     int64(globalLimitDownload),
 	}
 	if peerCert != nil {
 		configurePeerCertificate(s3Config, peerCert)
@@ -234,8 +235,8 @@ func probeS3Signature(ctx context.Context, accessKey, secretKey, url string, pee
 
 // BuildS3Config constructs an S3 Config and does
 // signature auto-probe when needed.
-func BuildS3Config(ctx context.Context, url, alias, accessKey, secretKey, api, path string, peerCert *x509.Certificate) (*Config, *probe.Error) {
-	s3Config := NewS3Config(url, &aliasConfigV10{
+func BuildS3Config(ctx context.Context, alias, url, accessKey, secretKey, api, path string, peerCert *x509.Certificate) (*Config, *probe.Error) {
+	s3Config := NewS3Config(alias, url, &aliasConfigV10{
 		AccessKey: accessKey,
 		SecretKey: secretKey,
 		URL:       url,
@@ -255,7 +256,7 @@ func BuildS3Config(ctx context.Context, url, alias, accessKey, secretKey, api, p
 	// Probe S3 signature version
 	api, err := probeS3Signature(ctx, accessKey, secretKey, url, peerCert)
 	if err != nil {
-		return nil, err.Trace(url, accessKey, secretKey, api, path)
+		return nil, err.Trace(url, accessKey, api, path)
 	}
 
 	s3Config.Signature = api
@@ -268,7 +269,7 @@ func fetchAliasKeys(args cli.Args) (string, string) {
 	accessKey := ""
 	secretKey := ""
 	console.SetColor(cred, color.New(color.FgYellow, color.Italic))
-	isTerminal := terminal.IsTerminal(int(os.Stdin.Fd()))
+	isTerminal := term.IsTerminal(int(os.Stdin.Fd()))
 	reader := bufio.NewReader(os.Stdin)
 
 	argsNr := len(args)
@@ -286,7 +287,7 @@ func fetchAliasKeys(args cli.Args) (string, string) {
 	if argsNr == 2 || argsNr == 3 {
 		if isTerminal {
 			fmt.Printf("%s", console.Colorize(cred, "Enter Secret Key: "))
-			bytePassword, _ := terminal.ReadPassword(int(os.Stdin.Fd()))
+			bytePassword, _ := term.ReadPassword(int(os.Stdin.Fd()))
 			fmt.Printf("\n")
 			secretKey = string(bytePassword)
 		} else {
@@ -335,11 +336,11 @@ func mainAliasSet(cli *cli.Context, deprecated bool) error {
 
 	if !globalInsecure && !globalJSON && term.IsTerminal(int(os.Stdout.Fd())) {
 		peerCert, err = promptTrustSelfSignedCert(ctx, url, alias)
-		fatalIf(err.Trace(cli.Args()...), "Unable to initialize new alias from the provided credentials.")
+		fatalIf(err.Trace(alias, url, accessKey), "Unable to initialize new alias from the provided credentials.")
 	}
 
-	s3Config, err := BuildS3Config(ctx, url, alias, accessKey, secretKey, api, path, peerCert)
-	fatalIf(err.Trace(cli.Args()...), "Unable to initialize new alias from the provided credentials.")
+	s3Config, err := BuildS3Config(ctx, alias, url, accessKey, secretKey, api, path, peerCert)
+	fatalIf(err.Trace(alias, url, accessKey), "Unable to initialize new alias from the provided credentials.")
 
 	msg := setAlias(alias, aliasConfigV10{
 		URL:       s3Config.HostURL,
@@ -362,12 +363,16 @@ func mainAliasSet(cli *cli.Context, deprecated bool) error {
 // TLS root CAs of s3Config. Once configured, any client
 // initialized with this config trusts the given peer certificate.
 func configurePeerCertificate(s3Config *Config, peerCert *x509.Certificate) {
+	tr, ok := s3Config.Transport.(*http.Transport)
+	if !ok {
+		return
+	}
 	switch {
-	case s3Config.Transport == nil:
+	case tr == nil:
 		if globalRootCAs != nil {
 			globalRootCAs.AddCert(peerCert)
 		}
-		s3Config.Transport = &http.Transport{
+		tr = &http.Transport{
 			Proxy: http.ProxyFromEnvironment,
 			DialContext: (&net.Dialer{
 				Timeout:   10 * time.Second,
@@ -380,12 +385,13 @@ func configurePeerCertificate(s3Config *Config, peerCert *x509.Certificate) {
 			DisableCompression:    true,
 			TLSClientConfig:       &tls.Config{RootCAs: globalRootCAs},
 		}
-	case s3Config.Transport.TLSClientConfig == nil || s3Config.Transport.TLSClientConfig.RootCAs == nil:
+	case tr.TLSClientConfig == nil || tr.TLSClientConfig.RootCAs == nil:
 		if globalRootCAs != nil {
 			globalRootCAs.AddCert(peerCert)
 		}
-		s3Config.Transport.TLSClientConfig = &tls.Config{RootCAs: globalRootCAs}
+		tr.TLSClientConfig = &tls.Config{RootCAs: globalRootCAs}
 	default:
-		s3Config.Transport.TLSClientConfig.RootCAs.AddCert(peerCert)
+		tr.TLSClientConfig.RootCAs.AddCert(peerCert)
 	}
+	s3Config.Transport = tr
 }

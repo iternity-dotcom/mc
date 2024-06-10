@@ -21,12 +21,13 @@ import (
 	"github.com/fatih/color"
 	"github.com/minio/cli"
 	"github.com/minio/mc/pkg/probe"
-	"github.com/minio/pkg/console"
+	"github.com/minio/pkg/v3/console"
 )
 
 var adminPolicyListCmd = cli.Command{
 	Name:         "list",
-	Usage:        "list all policies",
+	ShortName:    "ls",
+	Usage:        "list all IAM policies",
 	Action:       mainAdminPolicyList,
 	OnUsageError: onUsageError,
 	Before:       setGlobalsFromContext,

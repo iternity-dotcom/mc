@@ -23,7 +23,6 @@ import (
 
 	"github.com/minio/cli"
 	"github.com/minio/minio-go/v7/pkg/set"
-	"github.com/minio/pkg/console"
 )
 
 var adminSubnetHealthCmd = cli.Command{
@@ -33,7 +32,7 @@ var adminSubnetHealthCmd = cli.Command{
 	Action:             mainSubnetHealth,
 	Before:             setGlobalsFromContext,
 	Hidden:             true,
-	Flags:              append(supportDiagFlags, globalFlags...),
+	Flags:              supportDiagFlags, // No need to append globalFlags as top level command would add them
 	CustomHelpTemplate: "This command is deprecated and will be removed in a future release. Use 'mc support diag' instead.\n",
 }
 
@@ -59,7 +58,7 @@ func mainSubnetHealth(ctx *cli.Context) error {
 		}
 		newCmd = append(newCmd, flgStr)
 	}
-	msg := fmt.Sprintf("Please use '%s'", strings.Join(newCmd, " "))
-	console.Infoln(msg)
+
+	deprecatedError(strings.Join(newCmd, " "))
 	return nil
 }

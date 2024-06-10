@@ -20,6 +20,8 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -31,11 +33,12 @@ import (
 
 	"github.com/dustin/go-humanize"
 	"github.com/google/shlex"
+	"github.com/minio/cli"
 	"github.com/minio/mc/pkg/probe"
-	"github.com/minio/pkg/console"
+	"github.com/minio/pkg/v3/console"
 
 	// golang does not support flat keys for path matching, find does
-	"github.com/minio/pkg/wildcard"
+	"github.com/minio/pkg/v3/wildcard"
 )
 
 // findMessage holds JSON and string values for printing find command output.
@@ -45,7 +48,12 @@ type findMessage struct {
 
 // String calls tells the console what to print and how to print it.
 func (f findMessage) String() string {
-	return console.Colorize("Find", f.contentMessage.Key)
+	var msg string
+	msg += f.contentMessage.Key
+	if f.VersionID != "" {
+		msg += " (" + f.contentMessage.VersionID + ")"
+	}
+	return console.Colorize("Find", msg)
 }
 
 // JSON formats output to be JSON output.
@@ -89,10 +97,10 @@ func nameMatch(pattern, path string) bool {
 	return matched
 }
 
-func headerMatch(pattern, header string) bool {
+func patternMatch(pattern, match string) bool {
 	pattern = strings.ToLower(pattern)
-	header = strings.ToLower(header)
-	return wildcard.Match(pattern, header)
+	match = strings.ToLower(match)
+	return wildcard.Match(pattern, match)
 }
 
 // pathMatch reports whether path matches the wildcard pattern.
@@ -102,13 +110,6 @@ func headerMatch(pattern, header string) bool {
 // the example here https://play.golang.org/p/Ega9qgD4Qz .
 func pathMatch(pattern, path string) bool {
 	return wildcard.Match(pattern, path)
-}
-
-// regexMatch reports whether path matches the regex pattern.
-func regexMatch(pattern, path string) bool {
-	matched, e := regexp.MatchString(pattern, path)
-	errorIf(probe.NewError(e).Trace(pattern), "Unable to regex match with input pattern.")
-	return matched
 }
 
 func getExitStatus(err error) int {
@@ -270,10 +271,16 @@ func doFind(ctxCtx context.Context, ctx *findContext) error {
 	// following defer is a no-op.
 	defer watchFind(ctxCtx, ctx)
 
-	var prevKeyName string
+	lstOptions := ListOptions{
+		WithOlderVersions: ctx.withOlderVersions,
+		WithDeleteMarkers: false,
+		Recursive:         true,
+		ShowDir:           DirFirst,
+		WithMetadata:      len(ctx.matchMeta) > 0 || len(ctx.matchTags) > 0,
+	}
 
 	// iterate over all content which is within the given directory
-	for content := range ctx.clnt.List(globalContext, ListOptions{Recursive: true, ShowDir: DirFirst}) {
+	for content := range ctx.clnt.List(globalContext, lstOptions) {
 		if content.Err != nil {
 			switch content.Err.ToGoError().(type) {
 			// handle this specifically for filesystem related errors.
@@ -299,17 +306,18 @@ func doFind(ctxCtx context.Context, ctx *findContext) error {
 
 		fileKeyName := getAliasedPath(ctx, content.URL.String())
 		fileContent := contentMessage{
-			Key:  fileKeyName,
-			Time: content.Time.Local(),
-			Size: content.Size,
+			Key:       fileKeyName,
+			VersionID: content.VersionID,
+			Time:      content.Time.Local(),
+			Size:      content.Size,
+			Metadata:  content.UserMetadata,
+			Tags:      content.Tags,
 		}
 
 		// Match the incoming content, didn't match return.
-		if !matchFind(ctx, fileContent) || prevKeyName == fileKeyName {
+		if !matchFind(ctx, fileContent) {
 			continue
 		} // For all matching content
-
-		prevKeyName = fileKeyName
 
 		// proceed to either exec, format the output string.
 		if ctx.execCmd != "" {
@@ -333,54 +341,35 @@ func doFind(ctxCtx context.Context, ctx *findContext) error {
 func stringsReplace(ctx context.Context, args string, fileContent contentMessage) string {
 	// replace all instances of {}
 	str := args
-	if strings.Contains(str, "{}") {
-		str = strings.ReplaceAll(str, "{}", fileContent.Key)
-	}
+
+	str = strings.ReplaceAll(str, "{}", fileContent.Key)
 
 	// replace all instances of {""}
-	if strings.Contains(str, `{""}`) {
-		str = strings.ReplaceAll(str, `{""}`, strconv.Quote(fileContent.Key))
-	}
+	str = strings.ReplaceAll(str, `{""}`, strconv.Quote(fileContent.Key))
 
 	// replace all instances of {base}
-	if strings.Contains(str, "{base}") {
-		str = strings.ReplaceAll(str, "{base}", filepath.Base(fileContent.Key))
-	}
+	str = strings.ReplaceAll(str, "{base}", filepath.Base(fileContent.Key))
 
 	// replace all instances of {"base"}
-	if strings.Contains(str, `{"base"}`) {
-		str = strings.ReplaceAll(str, `{"base"}`, strconv.Quote(filepath.Base(fileContent.Key)))
-	}
+	str = strings.ReplaceAll(str, `{"base"}`, strconv.Quote(filepath.Base(fileContent.Key)))
 
 	// replace all instances of {dir}
-	if strings.Contains(str, "{dir}") {
-		str = strings.ReplaceAll(str, "{dir}", filepath.Dir(fileContent.Key))
-	}
+	str = strings.ReplaceAll(str, "{dir}", filepath.Dir(fileContent.Key))
 
 	// replace all instances of {"dir"}
-	if strings.Contains(str, `{"dir"}`) {
-		str = strings.ReplaceAll(str, `{"dir"}`, strconv.Quote(filepath.Dir(fileContent.Key)))
-	}
+	str = strings.ReplaceAll(str, `{"dir"}`, strconv.Quote(filepath.Dir(fileContent.Key)))
 
 	// replace all instances of {size}
-	if strings.Contains(str, "{size}") {
-		str = strings.ReplaceAll(str, "{size}", humanize.IBytes(uint64(fileContent.Size)))
-	}
+	str = strings.ReplaceAll(str, "{size}", humanize.IBytes(uint64(fileContent.Size)))
 
 	// replace all instances of {"size"}
-	if strings.Contains(str, `{"size"}`) {
-		str = strings.ReplaceAll(str, `{"size"}`, strconv.Quote(humanize.IBytes(uint64(fileContent.Size))))
-	}
+	str = strings.ReplaceAll(str, `{"size"}`, strconv.Quote(humanize.IBytes(uint64(fileContent.Size))))
 
 	// replace all instances of {time}
-	if strings.Contains(str, "{time}") {
-		str = strings.ReplaceAll(str, "{time}", fileContent.Time.Format(printDate))
-	}
+	str = strings.ReplaceAll(str, "{time}", fileContent.Time.Format(printDate))
 
 	// replace all instances of {"time"}
-	if strings.Contains(str, `{"time"}`) {
-		str = strings.ReplaceAll(str, `{"time"}`, strconv.Quote(fileContent.Time.Format(printDate)))
-	}
+	str = strings.ReplaceAll(str, `{"time"}`, strconv.Quote(fileContent.Time.Format(printDate)))
 
 	// replace all instances of {url}
 	if strings.Contains(str, "{url}") {
@@ -391,6 +380,12 @@ func stringsReplace(ctx context.Context, args string, fileContent contentMessage
 	if strings.Contains(str, `{"url"}`) {
 		str = strings.ReplaceAll(str, `{"url"}`, strconv.Quote(getShareURL(ctx, fileContent.Key)))
 	}
+
+	// replace all instances of {version}
+	str = strings.ReplaceAll(str, `{version}`, fileContent.VersionID)
+
+	// replace all instances of {"version"}
+	str = strings.ReplaceAll(str, `{"version"}`, strconv.Quote(fileContent.VersionID))
 
 	return str
 }
@@ -416,8 +411,8 @@ func matchFind(ctx *findContext, fileContent contentMessage) (match bool) {
 	if match && ctx.pathPattern != "" {
 		match = pathMatch(ctx.pathPattern, path)
 	}
-	if match && ctx.regexPattern != "" {
-		match = regexMatch(ctx.regexPattern, path)
+	if match && ctx.regexPattern != nil {
+		match = ctx.regexPattern.MatchString(path)
 	}
 	if match && ctx.olderThan != "" {
 		match = !isOlder(fileContent.Time, ctx.olderThan)
@@ -430,6 +425,12 @@ func matchFind(ctx *findContext, fileContent contentMessage) (match bool) {
 	}
 	if match && ctx.smallerSize > 0 {
 		match = int64(ctx.smallerSize) > fileContent.Size
+	}
+	if match && len(ctx.matchMeta) > 0 {
+		match = matchMetadataRegexMaps(ctx.matchMeta, fileContent.Metadata)
+	}
+	if match && len(ctx.matchTags) > 0 {
+		match = matchRegexMaps(ctx.matchTags, fileContent.Tags)
 	}
 	return match
 }
@@ -449,7 +450,7 @@ func getShareURL(ctx context.Context, path string) string {
 	content, err := clnt.Stat(ctx, StatOptions{})
 	fatalIf(err.Trace(targetURLFull, targetAlias), "Unable to lookup file/object.")
 
-	// Skip if its a directory.
+	// Skip if it is a directory.
 	if content.Type.IsDir() {
 		return ""
 	}
@@ -463,4 +464,74 @@ func getShareURL(ctx context.Context, path string) string {
 	fatalIf(err.Trace(targetAlias, objectURL), "Unable to generate share url.")
 
 	return shareURL
+}
+
+// getRegexMap returns a map from the StringSlice key.
+// Each entry must be key=regex.
+// Will exit with error if an un-parsable entry is found.
+func getRegexMap(cliCtx *cli.Context, key string) map[string]*regexp.Regexp {
+	sl := cliCtx.StringSlice(key)
+	if len(sl) == 0 {
+		return nil
+	}
+	reMap := make(map[string]*regexp.Regexp, len(sl))
+	for _, v := range sl {
+		split := strings.SplitN(v, "=", 2)
+		if len(split) < 2 {
+			err := probe.NewError(fmt.Errorf("want one = separator, got none"))
+			fatalIf(err.Trace(v), "Unable to split key+value. Must be key=regex")
+		}
+		// No value means it should not exist or be empty.
+		if len(split[1]) == 0 {
+			reMap[split[0]] = nil
+			continue
+		}
+		var err error
+		reMap[split[0]], err = regexp.Compile(split[1])
+		if err != nil {
+			fatalIf(probe.NewError(err), fmt.Sprintf("Unable to compile metadata regex for %s=%s", split[0], split[1]))
+		}
+	}
+	return reMap
+}
+
+// matchRegexMaps will check if all regexes in 'm' match values in 'v' with the same key.
+// If a regex is nil, it must either not exist in v or have a 0 length value.
+func matchRegexMaps(m map[string]*regexp.Regexp, v map[string]string) bool {
+	for k, reg := range m {
+		if reg == nil {
+			if v[k] != "" {
+				return false
+			}
+			// Does not exist or empty, that is fine.
+			continue
+		}
+		val, ok := v[k]
+		if !ok || !reg.MatchString(val) {
+			return false
+		}
+	}
+	return true
+}
+
+// matchMetadataRegexMaps will check if all regexes in 'm' match values in 'v' with the same key.
+// If a regex is nil, it must either not exist in v or have a 0 length value.
+func matchMetadataRegexMaps(m map[string]*regexp.Regexp, v map[string]string) bool {
+	for k, reg := range m {
+		if reg == nil {
+			if v[k] != "" {
+				return false
+			}
+			// Does not exist or empty, that is fine.
+			continue
+		}
+		val, ok := v[k]
+		if !ok {
+			val, ok = v[http.CanonicalHeaderKey(fmt.Sprintf("X-Amz-Meta-%s", k))]
+		}
+		if !ok || !reg.MatchString(val) {
+			return false
+		}
+	}
+	return true
 }

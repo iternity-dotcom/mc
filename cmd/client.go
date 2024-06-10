@@ -49,6 +49,7 @@ type GetOptions struct {
 	VersionID  string
 	Zip        bool
 	RangeStart int64
+	Preserve   bool
 }
 
 // PutOptions holds options for PUT operation
@@ -60,16 +61,24 @@ type PutOptions struct {
 	storageClass          string
 	multipartSize         uint64
 	multipartThreads      uint
+	concurrentStream      bool
 }
 
 // StatOptions holds options of the HEAD operation
 type StatOptions struct {
-	incomplete bool
-	preserve   bool
-	sse        encrypt.ServerSide
-	timeRef    time.Time
-	versionID  string
-	isZip      bool
+	incomplete         bool
+	preserve           bool
+	sse                encrypt.ServerSide
+	timeRef            time.Time
+	versionID          string
+	isZip              bool
+	ignoreBucketExists bool
+}
+
+// BucketStatOptions - bucket stat.
+type BucketStatOptions struct {
+	bucket             string
+	ignoreBucketExists bool
 }
 
 // ListOptions holds options for listing operation
@@ -105,13 +114,14 @@ type Client interface {
 	// Bucket operations
 	MakeBucket(ctx context.Context, region string, ignoreExisting, withLock bool) *probe.Error
 	RemoveBucket(ctx context.Context, forceRemove bool) *probe.Error
+	ListBuckets(ctx context.Context) ([]*ClientContent, *probe.Error)
 
 	// Object lock config
 	SetObjectLockConfig(ctx context.Context, mode minio.RetentionMode, validity uint64, unit minio.ValidityUnit) *probe.Error
 	GetObjectLockConfig(ctx context.Context) (status string, mode minio.RetentionMode, validity uint64, unit minio.ValidityUnit, perr *probe.Error)
 
 	// Access policy operations.
-	GetAccess(ctx context.Context) (access string, policyJSON string, error *probe.Error)
+	GetAccess(ctx context.Context) (access, policyJSON string, error *probe.Error)
 	GetAccessRules(ctx context.Context) (policyRules map[string]string, error *probe.Error)
 	SetAccess(ctx context.Context, access string, isJSON bool) *probe.Error
 
@@ -122,7 +132,7 @@ type Client interface {
 	Select(ctx context.Context, expression string, sse encrypt.ServerSide, opts SelectObjectOpts) (io.ReadCloser, *probe.Error)
 
 	// I/O operations with metadata.
-	Get(ctx context.Context, opts GetOptions) (reader io.ReadCloser, err *probe.Error)
+	Get(ctx context.Context, opts GetOptions) (reader io.ReadCloser, content *ClientContent, err *probe.Error)
 	Put(ctx context.Context, reader io.Reader, size int64, progress io.Reader, opts PutOptions) (n int64, err *probe.Error)
 
 	// Object Locking related API
@@ -150,7 +160,7 @@ type Client interface {
 	DeleteTags(ctx context.Context, versionID string) *probe.Error
 
 	// Lifecycle operations
-	GetLifecycle(ctx context.Context) (*lifecycle.Configuration, *probe.Error)
+	GetLifecycle(ctx context.Context) (*lifecycle.Configuration, time.Time, *probe.Error)
 	SetLifecycle(ctx context.Context, config *lifecycle.Configuration) *probe.Error
 
 	// Versioning operations
@@ -160,7 +170,7 @@ type Client interface {
 	GetReplication(ctx context.Context) (replication.Config, *probe.Error)
 	SetReplication(ctx context.Context, cfg *replication.Config, opts replication.Options) *probe.Error
 	RemoveReplication(ctx context.Context) *probe.Error
-	GetReplicationMetrics(ctx context.Context) (replication.Metrics, *probe.Error)
+	GetReplicationMetrics(ctx context.Context) (replication.MetricsV2, *probe.Error)
 	ResetReplication(ctx context.Context, before time.Duration, arn string) (replication.ResyncTargetsInfo, *probe.Error)
 	ReplicationResyncStatus(ctx context.Context, arn string) (rinfo replication.ResyncTargetsInfo, err *probe.Error)
 
@@ -188,6 +198,7 @@ type ClientContent struct {
 	Type         os.FileMode
 	StorageClass string
 	Metadata     map[string]string
+	Tags         map[string]string
 	UserMetadata map[string]string
 	ETag         string
 	Expires      time.Time
@@ -213,6 +224,7 @@ type ClientContent struct {
 
 // Config - see http://docs.amazonwebservices.com/AmazonS3/latest/dev/index.html?RESTAuthentication.html
 type Config struct {
+	Alias             string
 	AccessKey         string
 	SecretKey         string
 	SessionToken      string
@@ -225,7 +237,9 @@ type Config struct {
 	Lookup            minio.BucketLookupType
 	ConnReadDeadline  time.Duration
 	ConnWriteDeadline time.Duration
-	Transport         *http.Transport
+	UploadLimit       int64
+	DownloadLimit     int64
+	Transport         http.RoundTripper
 }
 
 // SelectObjectOpts - opts entered for select API

@@ -25,8 +25,8 @@ import (
 	"github.com/minio/cli"
 	json "github.com/minio/colorjson"
 	"github.com/minio/mc/pkg/probe"
-	"github.com/minio/pkg/console"
-	iampolicy "github.com/minio/pkg/iam/policy"
+	"github.com/minio/pkg/v3/console"
+	"github.com/minio/pkg/v3/policy"
 )
 
 var adminUserSvcAcctInfoFlags = []cli.Flag{
@@ -69,7 +69,7 @@ func checkAdminUserSvcAcctInfoSyntax(ctx *cli.Context) {
 func mainAdminUserSvcAcctInfo(ctx *cli.Context) error {
 	checkAdminUserSvcAcctInfoSyntax(ctx)
 
-	console.SetColor("SVCMessage", color.New(color.FgGreen))
+	console.SetColor("AccMessage", color.New(color.FgGreen))
 
 	// Get the alias parameter from cli
 	args := ctx.Args()
@@ -87,7 +87,7 @@ func mainAdminUserSvcAcctInfo(ctx *cli.Context) error {
 		if svcInfo.Policy == "" {
 			fatalIf(errDummy().Trace(args...), "No policy found associated to the specified service account. Check the policy of its parent user.")
 		}
-		p, e := iampolicy.ParseConfig(strings.NewReader(svcInfo.Policy))
+		p, e := policy.ParseConfig(strings.NewReader(svcInfo.Policy))
 		fatalIf(probe.NewError(e).Trace(args...), "Unable to parse policy.")
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", " ")
@@ -95,13 +95,16 @@ func mainAdminUserSvcAcctInfo(ctx *cli.Context) error {
 		return nil
 	}
 
-	printMsg(svcAcctMessage{
-		op:            ctx.Command.Name,
+	printMsg(acctMessage{
+		op:            svcAccOpInfo,
 		AccessKey:     svcAccount,
+		Name:          svcInfo.Name,
+		Description:   svcInfo.Description,
 		AccountStatus: svcInfo.AccountStatus,
 		ParentUser:    svcInfo.ParentUser,
 		ImpliedPolicy: svcInfo.ImpliedPolicy,
 		Policy:        json.RawMessage(svcInfo.Policy),
+		Expiration:    svcInfo.Expiration,
 	})
 
 	return nil

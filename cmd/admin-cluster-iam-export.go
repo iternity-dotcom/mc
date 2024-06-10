@@ -21,15 +21,15 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/fatih/color"
 	"github.com/minio/cli"
 	json "github.com/minio/colorjson"
 	"github.com/minio/mc/pkg/probe"
-	"github.com/minio/pkg/console"
+	"github.com/minio/pkg/v3/console"
 )
 
 var adminClusterIAMExportCmd = cli.Command{
@@ -68,7 +68,9 @@ func mainClusterIAMExport(ctx *cli.Context) error {
 
 	// Get the alias parameter from cli
 	args := ctx.Args()
-	aliasedURL := args.Get(0)
+	aliasedURL := filepath.ToSlash(args.Get(0))
+	aliasedURL = filepath.Clean(aliasedURL)
+
 	console.SetColor("File", color.New(color.FgWhite, color.Bold))
 
 	// Create a new MinIO Admin Client
@@ -82,7 +84,7 @@ func mainClusterIAMExport(ctx *cli.Context) error {
 	fatalIf(probe.NewError(e).Trace(aliasedURL), "Unable to export IAM info.")
 
 	// Create iam info zip file
-	tmpFile, e := ioutil.TempFile("", fmt.Sprintf("%s-iam-info", aliasedURL))
+	tmpFile, e := os.CreateTemp("", fmt.Sprintf("%s-iam-info", aliasedURL))
 	fatalIf(probe.NewError(e), "Unable to download file data.")
 
 	ext := "zip"

@@ -24,13 +24,13 @@ import (
 	"github.com/fatih/color"
 	"github.com/minio/cli"
 	"github.com/minio/mc/pkg/probe"
-	"github.com/minio/pkg/console"
-	"golang.org/x/crypto/ssh/terminal"
+	"github.com/minio/pkg/v3/console"
+	"golang.org/x/term"
 )
 
 var adminKMSCreateKeyCmd = cli.Command{
 	Name:         "create",
-	Usage:        "creates a new master key at the KMS",
+	Usage:        "creates a new master KMS key",
 	Action:       mainAdminKMSCreateKey,
 	OnUsageError: onUsageError,
 	Before:       setGlobalsFromContext,
@@ -63,7 +63,7 @@ func mainAdminKMSCreateKey(ctx *cli.Context) error {
 	e := client.CreateKey(globalContext, keyID)
 	fatalIf(probe.NewError(e), "Failed to create master key")
 
-	if terminal.IsTerminal(int(os.Stdout.Fd())) {
+	if term.IsTerminal(int(os.Stdout.Fd())) {
 		console.Println(color.GreenString(fmt.Sprintf("Created master key `%s` successfully", keyID)))
 	}
 	return nil
