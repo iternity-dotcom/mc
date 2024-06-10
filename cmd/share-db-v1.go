@@ -23,7 +23,7 @@ import (
 	"time"
 
 	"github.com/minio/mc/pkg/probe"
-	"github.com/minio/pkg/quick"
+	"github.com/minio/pkg/v3/quick"
 )
 
 // shareEntryV1 - container for each download/upload entries.
@@ -55,7 +55,7 @@ func newShareDBV1() *shareDBV1 {
 }
 
 // Set upload info for each share.
-func (s *shareDBV1) Set(objectURL string, shareURL string, expiry time.Duration, contentType string) {
+func (s *shareDBV1) Set(objectURL, shareURL string, expiry time.Duration, contentType string) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 

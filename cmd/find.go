@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,10 +35,10 @@ import (
 	"github.com/google/shlex"
 	"github.com/minio/cli"
 	"github.com/minio/mc/pkg/probe"
-	"github.com/minio/pkg/console"
+	"github.com/minio/pkg/v3/console"
 
 	// golang does not support flat keys for path matching, find does
-	"github.com/minio/pkg/wildcard"
+	"github.com/minio/pkg/v3/wildcard"
 )
 
 // findMessage holds JSON and string values for printing find command output.
@@ -96,10 +97,10 @@ func nameMatch(pattern, path string) bool {
 	return matched
 }
 
-func headerMatch(pattern, header string) bool {
+func patternMatch(pattern, match string) bool {
 	pattern = strings.ToLower(pattern)
-	header = strings.ToLower(header)
-	return wildcard.Match(pattern, header)
+	match = strings.ToLower(match)
+	return wildcard.Match(pattern, match)
 }
 
 // pathMatch reports whether path matches the wildcard pattern.
@@ -426,7 +427,7 @@ func matchFind(ctx *findContext, fileContent contentMessage) (match bool) {
 		match = int64(ctx.smallerSize) > fileContent.Size
 	}
 	if match && len(ctx.matchMeta) > 0 {
-		match = matchRegexMaps(ctx.matchMeta, fileContent.Metadata)
+		match = matchMetadataRegexMaps(ctx.matchMeta, fileContent.Metadata)
 	}
 	if match && len(ctx.matchTags) > 0 {
 		match = matchRegexMaps(ctx.matchTags, fileContent.Tags)
@@ -506,6 +507,28 @@ func matchRegexMaps(m map[string]*regexp.Regexp, v map[string]string) bool {
 			continue
 		}
 		val, ok := v[k]
+		if !ok || !reg.MatchString(val) {
+			return false
+		}
+	}
+	return true
+}
+
+// matchMetadataRegexMaps will check if all regexes in 'm' match values in 'v' with the same key.
+// If a regex is nil, it must either not exist in v or have a 0 length value.
+func matchMetadataRegexMaps(m map[string]*regexp.Regexp, v map[string]string) bool {
+	for k, reg := range m {
+		if reg == nil {
+			if v[k] != "" {
+				return false
+			}
+			// Does not exist or empty, that is fine.
+			continue
+		}
+		val, ok := v[k]
+		if !ok {
+			val, ok = v[http.CanonicalHeaderKey(fmt.Sprintf("X-Amz-Meta-%s", k))]
+		}
 		if !ok || !reg.MatchString(val) {
 			return false
 		}

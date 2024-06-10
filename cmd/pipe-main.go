@@ -36,10 +36,6 @@ func defaultPartSize() string {
 
 var pipeFlags = []cli.Flag{
 	cli.StringFlag{
-		Name:  "encrypt",
-		Usage: "encrypt objects (using server-side encryption with server managed keys)",
-	},
-	cli.StringFlag{
 		Name:  "storage-class, sc",
 		Usage: "set storage class for new object(s) on target",
 	},
@@ -75,7 +71,7 @@ var pipeCmd = cli.Command{
 	Action:       mainPipe,
 	OnUsageError: onUsageError,
 	Before:       setGlobalsFromContext,
-	Flags:        append(append(pipeFlags, ioFlags...), globalFlags...),
+	Flags:        append(append(pipeFlags, encFlags...), globalFlags...),
 	CustomHelpTemplate: `NAME:
   {{.HelpName}} - {{.Usage}}
 
@@ -85,9 +81,10 @@ USAGE:
 FLAGS:
   {{range .VisibleFlags}}{{.}}
   {{end}}{{end}}
+
 ENVIRONMENT VARIABLES:
-  MC_ENCRYPT:      list of comma delimited prefix values
-  MC_ENCRYPT_KEY:  list of comma delimited prefix=secret values
+  MC_ENC_KMS: KMS encryption key in the form of (alias/prefix=key).
+  MC_ENC_S3: S3 encryption key in the form of (alias/prefix=key).
 
 EXAMPLES:
   1. Write contents of stdin to a file on local filesystem.
@@ -99,21 +96,24 @@ EXAMPLES:
   3. Copy an ISO image to an object on Amazon S3 cloud storage.
      {{.Prompt}} cat debian-8.2.iso | {{.HelpName}} s3/opensource-isos/gnuos.iso
 
-  4. Stream MySQL database dump to Amazon S3 directly.
+  4. Copy an ISO image to an object on minio storage using KMS encryption.
+     {{.Prompt}} cat debian-8.2.iso | {{.HelpName}} --enc-kms="minio/opensource-isos=my-key-name" minio/opensource-isos/gnuos.iso
+
+  5. Stream MySQL database dump to Amazon S3 directly.
      {{.Prompt}} mysqldump -u root -p ******* accountsdb | {{.HelpName}} s3/sql-backups/backups/accountsdb-oct-9-2015.sql
 
-  5. Write contents of stdin to an object on Amazon S3 cloud storage and assign REDUCED_REDUNDANCY storage-class to the uploaded object.
+  6. Write contents of stdin to an object on Amazon S3 cloud storage and assign REDUCED_REDUNDANCY storage-class to the uploaded object.
      {{.Prompt}} {{.HelpName}} --storage-class REDUCED_REDUNDANCY s3/personalbuck/meeting-notes.txt
 
-  6. Copy to MinIO cloud storage with specified metadata, separated by ";"
+  7. Copy to MinIO cloud storage with specified metadata, separated by ";"
       {{.Prompt}} cat music.mp3 | {{.HelpName}} --attr "Cache-Control=max-age=90000,min-fresh=9000;Artist=Unknown" play/mybucket/music.mp3
 
-  7. Set tags to the uploaded objects
+  8. Set tags to the uploaded objects
       {{.Prompt}} tar cvf - . | {{.HelpName}} --tags "category=prod&type=backup" play/mybucket/backup.tar
 `,
 }
 
-func pipe(ctx *cli.Context, targetURL string, encKeyDB map[string][]prefixSSEPair, meta map[string]string) *probe.Error {
+func pipe(ctx *cli.Context, targetURL string, encKeyDB map[string][]prefixSSEPair, meta map[string]string, quiet bool) *probe.Error {
 	// If possible increase the pipe buffer size
 	if e := increasePipeBufferSize(os.Stdin, ctx.Int("pipe-max-size")); e != nil {
 		fatalIf(probe.NewError(e), "Unable to increase custom pipe-max-size")
@@ -155,9 +155,15 @@ func pipe(ctx *cli.Context, targetURL string, encKeyDB map[string][]prefixSSEPai
 		concurrentStream: ctx.IsSet("concurrent"),
 	}
 
-	pg := newProgressBar(0)
+	var reader io.Reader
+	if !quiet {
+		pg := newProgressBar(0)
+		reader = io.TeeReader(os.Stdin, pg)
+	} else {
+		reader = os.Stdin
+	}
 
-	_, err := putTargetStreamWithURL(targetURL, io.TeeReader(os.Stdin, pg), -1, opts)
+	_, err := putTargetStreamWithURL(targetURL, reader, -1, opts)
 	// TODO: See if this check is necessary.
 	switch e := err.ToGoError().(type) {
 	case *os.PathError:
@@ -169,21 +175,23 @@ func pipe(ctx *cli.Context, targetURL string, encKeyDB map[string][]prefixSSEPai
 	return err.Trace(targetURL)
 }
 
-// check pipe input arguments.
+// checkPipeSyntax - validate arguments passed by user
 func checkPipeSyntax(ctx *cli.Context) {
-	if len(ctx.Args()) > 1 {
+	if len(ctx.Args()) != 1 {
 		showCommandHelpAndExit(ctx, 1) // last argument is exit code.
 	}
 }
 
 // mainPipe is the main entry point for pipe command.
 func mainPipe(ctx *cli.Context) error {
-	// Parse encryption keys per command.
-	encKeyDB, err := getEncKeys(ctx)
-	fatalIf(err, "Unable to parse encryption keys.")
-
 	// validate pipe input arguments.
 	checkPipeSyntax(ctx)
+
+	encKeyDB, err := validateAndCreateEncryptionKeys(ctx)
+	fatalIf(err, "Unable to parse encryption keys.")
+
+	// globalQuiet is true for no window size to get. We just need --quiet here.
+	quiet := ctx.IsSet("quiet")
 
 	meta := map[string]string{}
 	if attr := ctx.String("attr"); attr != "" {
@@ -194,12 +202,12 @@ func mainPipe(ctx *cli.Context) error {
 		meta["X-Amz-Tagging"] = tags
 	}
 	if len(ctx.Args()) == 0 {
-		err = pipe(ctx, "", nil, meta)
+		err = pipe(ctx, "", nil, meta, quiet)
 		fatalIf(err.Trace("stdout"), "Unable to write to one or more targets.")
 	} else {
 		// extract URLs.
 		URLs := ctx.Args()
-		err = pipe(ctx, URLs[0], encKeyDB, meta)
+		err = pipe(ctx, URLs[0], encKeyDB, meta, quiet)
 		fatalIf(err.Trace(URLs[0]), "Unable to write to one or more targets.")
 	}
 

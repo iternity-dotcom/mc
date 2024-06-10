@@ -21,7 +21,7 @@ import (
 	"github.com/minio/cli"
 	json "github.com/minio/colorjson"
 	"github.com/minio/mc/pkg/probe"
-	"github.com/minio/pkg/console"
+	"github.com/minio/pkg/v3/console"
 )
 
 //   Configure an alias in MinIO Client
@@ -42,6 +42,7 @@ var aliasSubcommands = []cli.Command{
 	aliasListCmd,
 	aliasRemoveCmd,
 	aliasImportCmd,
+	aliasExportCmd,
 }
 
 var aliasCmd = cli.Command{

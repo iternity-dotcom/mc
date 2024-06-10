@@ -25,7 +25,7 @@ import (
 
 	"github.com/cheggaaa/pb"
 	"github.com/fatih/color"
-	"github.com/minio/pkg/console"
+	"github.com/minio/pkg/v3/console"
 )
 
 // progress extender.
@@ -59,18 +59,19 @@ func newPB(total int64) *pb.ProgressBar {
 
 	// Use different unicodes for Linux, OS X and Windows.
 	switch runtime.GOOS {
-	case "linux", "darwin":
+	case "linux":
 		// Need to add '\x00' as delimiter for unicode characters.
-		bar.Format("━\x00━\x00━\x00┉\x00━")
+		bar.Format("┃\x00▓\x00█\x00░\x00┃")
+	case "darwin":
+		// Need to add '\x00' as delimiter for unicode characters.
+		bar.Format(" \x00▓\x00 \x00░\x00 ")
 	default:
 		// Default to non unicode characters.
 		bar.Format("[=> ]")
 	}
 
 	// Start the progress bar.
-	bar.Start()
-
-	return bar
+	return bar.Start()
 }
 
 func newProgressReader(r io.Reader, caption string, total int64) *pb.Reader {
@@ -98,6 +99,10 @@ func (p *progressBar) SetCaption(caption string) *progressBar {
 	return p
 }
 
+func (p *progressBar) Finish() {
+	p.ProgressBar.Finish()
+}
+
 func (p *progressBar) Set64(length int64) *progressBar {
 	p.ProgressBar = p.ProgressBar.Set64(length)
 	return p
@@ -105,11 +110,9 @@ func (p *progressBar) Set64(length int64) *progressBar {
 
 func (p *progressBar) Read(buf []byte) (n int, err error) {
 	defer func() {
-		// After updating the internal progress bar, make sure that its
-		// current progress doesn't exceed the specified total progress
-		currentProgress := p.ProgressBar.Get()
-		if currentProgress > p.ProgressBar.Total {
-			p.ProgressBar.Set64(p.ProgressBar.Total)
+		// Upload retry can read one object twice; Avoid read to be greater than Total
+		if n, t := p.ProgressBar.Get(), p.ProgressBar.Total; t > 0 && n > t {
+			p.ProgressBar.Set64(t)
 		}
 	}()
 

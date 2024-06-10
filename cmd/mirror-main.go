@@ -36,7 +36,7 @@ import (
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/encrypt"
 	"github.com/minio/minio-go/v7/pkg/notification"
-	"github.com/minio/pkg/console"
+	"github.com/minio/pkg/v3/console"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -101,6 +101,14 @@ var (
 			Name:  "exclude",
 			Usage: "exclude object(s) that match specified object name pattern",
 		},
+		cli.StringSliceFlag{
+			Name:  "exclude-bucket",
+			Usage: "exclude bucket(s) that match specified bucket name pattern",
+		},
+		cli.StringSliceFlag{
+			Name:  "exclude-storageclass",
+			Usage: "exclude object(s) that match the specified storage class",
+		},
 		cli.StringFlag{
 			Name:  "older-than",
 			Usage: "filter object(s) older than value in duration string (e.g. 7d10h31s)",
@@ -114,16 +122,24 @@ var (
 			Usage: "specify storage class for new object(s) on target",
 		},
 		cli.StringFlag{
-			Name:  "encrypt",
-			Usage: "encrypt/decrypt objects (using server-side encryption with server managed keys)",
-		},
-		cli.StringFlag{
 			Name:  "attr",
 			Usage: "add custom metadata for all objects",
 		},
 		cli.StringFlag{
 			Name:  "monitoring-address",
 			Usage: "if specified, a new prometheus endpoint will be created to report mirroring activity. (eg: localhost:8081)",
+		},
+		cli.BoolFlag{
+			Name:  "retry",
+			Usage: "if specified, will enable retrying on a per object basis if errors occur",
+		},
+		cli.BoolFlag{
+			Name:  "summary",
+			Usage: "print a summary of the mirror session",
+		},
+		cli.BoolFlag{
+			Name:  "skip-errors",
+			Usage: "skip any errors when mirroring",
 		},
 	}
 )
@@ -135,7 +151,7 @@ var mirrorCmd = cli.Command{
 	Action:       mainMirror,
 	OnUsageError: onUsageError,
 	Before:       setGlobalsFromContext,
-	Flags:        append(append(mirrorFlags, ioFlags...), globalFlags...),
+	Flags:        append(append(mirrorFlags, encFlags...), globalFlags...),
 	CustomHelpTemplate: `NAME:
   {{.HelpName}} - {{.Usage}}
 
@@ -145,9 +161,10 @@ USAGE:
 FLAGS:
   {{range .VisibleFlags}}{{.}}
   {{end}}
+
 ENVIRONMENT VARIABLES:
-   MC_ENCRYPT:      list of comma delimited prefixes
-   MC_ENCRYPT_KEY:  list of comma delimited prefix=secret values
+  MC_ENC_KMS: KMS encryption key in the form of (alias/prefix=key).
+  MC_ENC_S3: S3 encryption key in the form of (alias/prefix=key).
 
 EXAMPLES:
   01. Mirror a bucket recursively from MinIO cloud storage to a bucket on Amazon S3 cloud storage.
@@ -180,18 +197,18 @@ EXAMPLES:
       Exclude all .* files and *.temp files when mirroring.
       {{.Prompt}} {{.HelpName}} --exclude ".*" --exclude "*.temp" s3/test ~/test
 
-  10. Mirror objects newer than 10 days from bucket test to a local folder.
+  10. Mirror all buckets from aliased Amazon S3 cloud storage to a local folder.
+      Exclude test* buckets and backup* buckets when mirroring.
+      {{.Prompt}} {{.HelpName}} --exclude-bucket 'test*' --exclude 'backup*' s3 ~/test
+
+  11. Mirror objects newer than 10 days from bucket test to a local folder.
       {{.Prompt}} {{.HelpName}} --newer-than 10d s3/test ~/localfolder
 
-  11. Mirror objects older than 30 days from Amazon S3 bucket test to a local folder.
+  12. Mirror objects older than 30 days from Amazon S3 bucket test to a local folder.
       {{.Prompt}} {{.HelpName}} --older-than 30d s3/test ~/test
 
-  12. Mirror server encrypted objects from MinIO cloud storage to a bucket on Amazon S3 cloud storage
-      {{.Prompt}} {{.HelpName}} --encrypt-key "minio/photos=32byteslongsecretkeymustbegiven1,s3/archive=32byteslongsecretkeymustbegiven2" minio/photos/ s3/archive/
-
-  13. Mirror server encrypted objects from MinIO cloud storage to a bucket on Amazon S3 cloud storage. In case the encryption key contains
-      non-printable character like tab, pass the base64 encoded string as key.
-      {{.Prompt}} {{.HelpName}} --encrypt-key "s3/photos/=32byteslongsecretkeymustbegiven1,play/archive/=MzJieXRlc2xvbmdzZWNyZXRrZQltdXN0YmVnaXZlbjE=" s3/photos/ play/archive/
+  13. Mirror server encrypted objects from Amazon S3 cloud storage to a bucket on Amazon S3 cloud storage
+      {{.Prompt}} {{.HelpName}} --enc-c "minio/archive=MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDA" --enc-c "s3/archive=MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5BBB" s3/archive/ minio/archive/ 
 
   14. Update 'Cache-Control' header on all existing objects recursively.
       {{.Prompt}} {{.HelpName}} --attr "Cache-Control=max-age=90000,min-fresh=9000" myminio/video-files myminio/video-files
@@ -457,22 +474,50 @@ func (mj *mirrorJob) doMirror(ctx context.Context, sURLs URLs) URLs {
 
 	sourcePath := filepath.ToSlash(filepath.Join(sourceAlias, sourceURL.Path))
 	targetPath := filepath.ToSlash(filepath.Join(targetAlias, targetURL.Path))
-	mj.status.PrintMsg(mirrorMessage{
-		Source:     sourcePath,
-		Target:     targetPath,
-		Size:       length,
-		TotalCount: sURLs.TotalCount,
-		TotalSize:  sURLs.TotalSize,
-	})
+	if !mj.opts.isSummary {
+		mj.status.PrintMsg(mirrorMessage{
+			Source:     sourcePath,
+			Target:     targetPath,
+			Size:       length,
+			TotalCount: sURLs.TotalCount,
+			TotalSize:  sURLs.TotalSize,
+		})
+	}
 	sURLs.MD5 = mj.opts.md5
 	sURLs.DisableMultipart = mj.opts.disableMultipart
 
-	now := time.Now()
-	ret := uploadSourceToTargetURL(ctx, sURLs, mj.status, mj.opts.encKeyDB, mj.opts.isMetadata, false)
-	if ret.Error == nil {
-		durationMs := time.Since(now).Milliseconds()
-		mirrorReplicationDurations.With(prometheus.Labels{"object_size": convertSizeToTag(sURLs.SourceContent.Size)}).Observe(float64(durationMs))
+	var ret URLs
+
+	if !mj.opts.isRetriable {
+		now := time.Now()
+		ret = uploadSourceToTargetURL(ctx, uploadSourceToTargetURLOpts{urls: sURLs, progress: mj.status, encKeyDB: mj.opts.encKeyDB, preserve: mj.opts.isMetadata, isZip: false})
+		if ret.Error == nil {
+			durationMs := time.Since(now).Milliseconds()
+			mirrorReplicationDurations.With(prometheus.Labels{"object_size": convertSizeToTag(sURLs.SourceContent.Size)}).Observe(float64(durationMs))
+		}
+
+		return ret
 	}
+
+	newRetryManager(ctx, time.Second, 3).retry(func(rm *retryManager) *probe.Error {
+		if rm.retries > 0 {
+			printMsg(retryMessage{
+				SourceURL: sURLs.SourceContent.URL.String(),
+				TargetURL: sURLs.TargetContent.URL.String(),
+				Retries:   rm.retries,
+			})
+		}
+
+		now := time.Now()
+		ret = uploadSourceToTargetURL(ctx, uploadSourceToTargetURLOpts{urls: sURLs, progress: mj.status, encKeyDB: mj.opts.encKeyDB, preserve: mj.opts.isMetadata, isZip: false})
+		if ret.Error == nil {
+			durationMs := time.Since(now).Milliseconds()
+			mirrorReplicationDurations.With(prometheus.Labels{"object_size": convertSizeToTag(sURLs.SourceContent.Size)}).Observe(float64(durationMs))
+		}
+
+		return ret.Error
+	})
+
 	return ret
 }
 
@@ -503,8 +548,19 @@ func (mj *mirrorJob) monitorMirrorStatus(cancel context.CancelFunc) (errDuringMi
 				if isErrIgnored(sURLs.Error) {
 					ignoreErr = true
 				} else {
-					errorIf(sURLs.Error.Trace(sURLs.SourceContent.URL.String()),
-						fmt.Sprintf("Failed to copy `%s`.", sURLs.SourceContent.URL.String()))
+					switch sURLs.Error.ToGoError().(type) {
+					case PathInsufficientPermission:
+						// Ignore Permission error.
+						ignoreErr = true
+					}
+					if !ignoreErr {
+						if !mj.opts.skipErrors {
+							errorIf(sURLs.Error.Trace(sURLs.SourceContent.URL.String()),
+								fmt.Sprintf("Failed to copy `%s`.", sURLs.SourceContent.URL.String()))
+						} else {
+							console.Infof("[Warn] Failed to copy `%s`. %s", sURLs.SourceContent.URL.String(), sURLs.Error.Trace(sURLs.SourceContent.URL.String()))
+						}
+					}
 				}
 			case sURLs.TargetContent != nil:
 				// When sURLs.SourceContent is nil, we know that we have an error related to removing
@@ -526,7 +582,7 @@ func (mj *mirrorJob) monitorMirrorStatus(cancel context.CancelFunc) (errDuringMi
 				mirrorFailedOps.Inc()
 				errDuringMirror = true
 				// Quit mirroring if --watch and --active-active are not passed
-				if !mj.opts.activeActive && !mj.opts.isWatch {
+				if !mj.opts.skipErrors && !mj.opts.activeActive && !mj.opts.isWatch {
 					cancel()
 					cancelInProgress = true
 				}
@@ -577,8 +633,26 @@ func (mj *mirrorJob) watchMirrorEvents(ctx context.Context, events []EventInfo) 
 		// joined to the targetURL.
 		sourceSuffix := strings.TrimPrefix(eventPath, sourceURLFull)
 		// Skip the object, if it matches the Exclude options provided
-		if matchExcludeOptions(mj.opts.excludeOptions, sourceSuffix) {
+		if matchExcludeOptions(mj.opts.excludeOptions, sourceSuffix, sourceURL.Type) {
 			continue
+		}
+		// Skip the bucket, if it matches the Exclude options provided
+		if matchExcludeBucketOptions(mj.opts.excludeBuckets, sourceSuffix) {
+			continue
+		}
+
+		sc, ok := event.UserMetadata["x-amz-storage-class"]
+		if ok {
+			var found bool
+			for _, esc := range mj.opts.excludeStorageClasses {
+				if esc == sc {
+					found = true
+					break
+				}
+			}
+			if found {
+				continue
+			}
 		}
 
 		targetPath := urlJoinPath(mj.targetURL, sourceSuffix)
@@ -607,6 +681,8 @@ func (mj *mirrorJob) watchMirrorEvents(ctx context.Context, events []EventInfo) 
 				encKeyDB:         mj.opts.encKeyDB,
 			}
 			if mj.opts.activeActive &&
+				event.Type != notification.ObjectCreatedCopy &&
+				event.Type != notification.ObjectCreatedCompleteMultipartUpload &&
 				(getSourceModTimeKey(mirrorURL.SourceContent.Metadata) != "" ||
 					getSourceModTimeKey(mirrorURL.SourceContent.UserMetadata) != "") {
 				// If source has active-active attributes, it means that the
@@ -797,7 +873,7 @@ func newMirrorJob(srcURL, dstURL string, opts mirrorOptions) *mirrorJob {
 
 	// we'll define the status to use here,
 	// do we want the quiet status? or the progressbar
-	if globalQuiet {
+	if globalQuiet || opts.isSummary {
 		mj.status = NewQuietStatus(mj.parallel)
 	} else if globalJSON {
 		mj.status = NewQuietStatus(mj.parallel)
@@ -886,24 +962,28 @@ func runMirror(ctx context.Context, srcURL, dstURL string, cli *cli.Context, enc
 
 	// preserve is also expected to be overwritten if necessary
 	isMetadata := cli.Bool("a") || isWatch || len(userMetadata) > 0
-	isOverwrite = isOverwrite || isMetadata
 	isFake := cli.Bool("fake") || cli.Bool("dry-run")
 
 	mopts := mirrorOptions{
-		isFake:           isFake,
-		isRemove:         isRemove,
-		isOverwrite:      isOverwrite,
-		isWatch:          isWatch,
-		isMetadata:       isMetadata,
-		md5:              cli.Bool("md5"),
-		disableMultipart: cli.Bool("disable-multipart"),
-		excludeOptions:   cli.StringSlice("exclude"),
-		olderThan:        cli.String("older-than"),
-		newerThan:        cli.String("newer-than"),
-		storageClass:     cli.String("storage-class"),
-		userMetadata:     userMetadata,
-		encKeyDB:         encKeyDB,
-		activeActive:     isWatch,
+		isFake:                isFake,
+		isRemove:              isRemove,
+		isOverwrite:           isOverwrite,
+		isWatch:               isWatch,
+		isMetadata:            isMetadata,
+		isSummary:             cli.Bool("summary"),
+		isRetriable:           cli.Bool("retry"),
+		md5:                   cli.Bool("md5"),
+		disableMultipart:      cli.Bool("disable-multipart"),
+		skipErrors:            cli.Bool("skip-errors"),
+		excludeOptions:        cli.StringSlice("exclude"),
+		excludeBuckets:        cli.StringSlice("exclude-bucket"),
+		excludeStorageClasses: cli.StringSlice("exclude-storageclass"),
+		olderThan:             cli.String("older-than"),
+		newerThan:             cli.String("newer-than"),
+		storageClass:          cli.String("storage-class"),
+		userMetadata:          userMetadata,
+		encKeyDB:              encKeyDB,
+		activeActive:          isWatch,
 	}
 
 	// Create a new mirror job and execute it
@@ -968,6 +1048,11 @@ func runMirror(ctx context.Context, srcURL, dstURL string, cli *cli.Context, enc
 					continue
 				}
 
+				// Skip create bucket, if it matches the Exclude options provided
+				if matchExcludeBucketOptions(mopts.excludeBuckets, sourceSuffix) {
+					continue
+				}
+
 				// Bucket only exists in the source, create the same bucket in the destination
 				if err := newDstClt.MakeBucket(ctx, cli.String("region"), false, withLock); err != nil {
 					errorIf(err, "Unable to create bucket at `"+newTgtURL+"`.")
@@ -1015,8 +1100,7 @@ func mainMirror(cliCtx *cli.Context) error {
 	ctx, cancelMirror := context.WithCancel(globalContext)
 	defer cancelMirror()
 
-	// Parse encryption keys per command.
-	encKeyDB, err := getEncKeys(cliCtx)
+	encKeyDB, err := validateAndCreateEncryptionKeys(cliCtx)
 	fatalIf(err, "Unable to parse encryption keys.")
 
 	// check 'mirror' cli arguments.

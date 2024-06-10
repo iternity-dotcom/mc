@@ -44,7 +44,7 @@ import (
 	"github.com/minio/minio-go/v7/pkg/lifecycle"
 	"github.com/minio/minio-go/v7/pkg/notification"
 	"github.com/minio/minio-go/v7/pkg/replication"
-	"github.com/minio/pkg/console"
+	"github.com/minio/pkg/v3/console"
 )
 
 // filesystem client
@@ -540,21 +540,53 @@ func (f *fsClient) Copy(ctx context.Context, source string, opts CopyOptions, pr
 }
 
 // Get returns reader and any additional metadata.
-func (f *fsClient) Get(_ context.Context, opts GetOptions) (io.ReadCloser, *probe.Error) {
+func (f *fsClient) Get(_ context.Context, opts GetOptions) (io.ReadCloser, *ClientContent, *probe.Error) {
 	fileData, e := os.Open(f.PathURL.Path)
 	if e != nil {
 		err := f.toClientError(e, f.PathURL.Path)
-		return nil, err.Trace(f.PathURL.Path)
+		return nil, nil, err.Trace(f.PathURL.Path)
 	}
 	if opts.RangeStart != 0 {
 		_, e := fileData.Seek(opts.RangeStart, io.SeekStart)
 		if e != nil {
 			err := f.toClientError(e, f.PathURL.Path)
-			return nil, err.Trace(f.PathURL.Path)
+			return nil, nil, err.Trace(f.PathURL.Path)
 		}
 	}
 
-	return fileData, nil
+	fi, e := fileData.Stat()
+	if e != nil {
+		return nil, nil, probe.NewError(e)
+	}
+
+	content := &ClientContent{}
+	content.URL = *f.PathURL
+	content.Size = fi.Size()
+	content.Time = fi.ModTime()
+	content.Type = fi.Mode()
+	content.Metadata = map[string]string{
+		"Content-Type": guessURLContentType(f.PathURL.Path),
+	}
+
+	path := f.PathURL.String()
+	// Populates meta data with file system attribute only in case of
+	// when preserve flag is passed.
+	if opts.Preserve {
+		fileAttr, err := disk.GetFileSystemAttrs(path)
+		if err != nil {
+			return nil, content, nil
+		}
+		metaData, pErr := getAllXattrs(path)
+		if pErr != nil {
+			return nil, content, nil
+		}
+		for k, v := range metaData {
+			content.Metadata[k] = v
+		}
+		content.Metadata[metadataKey] = fileAttr
+	}
+
+	return fileData, content, nil
 }
 
 // Check if the given error corresponds to ENOTEMPTY for unix
@@ -881,7 +913,7 @@ func (f *fsClient) listInRoutine(contentCh chan<- *ClientContent) {
 	switch fst.Mode().IsDir() {
 	case true:
 		files, e := readDir(fpath)
-		if err != nil {
+		if e != nil {
 			contentCh <- &ClientContent{Err: probe.NewError(e)}
 			return
 		}
@@ -925,7 +957,7 @@ func (f *fsClient) listInRoutine(contentCh chan<- *ClientContent) {
 }
 
 // List files recursively using non-recursive mode.
-func (f *fsClient) listDirOpt(contentCh chan *ClientContent, isIncomplete bool, _ bool, dirOpt DirOpt) {
+func (f *fsClient) listDirOpt(contentCh chan *ClientContent, isIncomplete, _ bool, dirOpt DirOpt) {
 	defer close(contentCh)
 
 	// Trim trailing / or \.
@@ -1191,7 +1223,7 @@ func (f *fsClient) GetObjectLegalHold(_ context.Context, _ string) (minio.LegalH
 }
 
 // GetAccess - get access policy permissions.
-func (f *fsClient) GetAccess(_ context.Context) (access string, policyJSON string, err *probe.Error) {
+func (f *fsClient) GetAccess(_ context.Context) (access, policyJSON string, err *probe.Error) {
 	// For windows this feature is not implemented.
 	if runtime.GOOS == "windows" {
 		return "", "", probe.NewError(APINotImplemented{API: "GetAccess", APIType: "filesystem"})
@@ -1404,8 +1436,8 @@ func (f *fsClient) RemoveReplication(_ context.Context) *probe.Error {
 }
 
 // GetReplicationMetrics - Get replication metrics for a given bucket, not implemented.
-func (f *fsClient) GetReplicationMetrics(_ context.Context) (replication.Metrics, *probe.Error) {
-	return replication.Metrics{}, probe.NewError(APINotImplemented{
+func (f *fsClient) GetReplicationMetrics(_ context.Context) (replication.MetricsV2, *probe.Error) {
+	return replication.MetricsV2{}, probe.NewError(APINotImplemented{
 		API:     "GetReplicationMetrics",
 		APIType: "filesystem",
 	})

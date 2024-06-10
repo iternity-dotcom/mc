@@ -135,7 +135,7 @@ func makeCurlCmd(key, postURL string, isRecursive bool, uploadInfo map[string]st
 }
 
 // save shared URL to disk.
-func saveSharedURL(objectURL string, shareURL string, expiry time.Duration, contentType string) *probe.Error {
+func saveSharedURL(objectURL, shareURL string, expiry time.Duration, contentType string) *probe.Error {
 	// Load previously saved upload-shares.
 	shareDB := newShareDBV1()
 	if err := shareDB.Load(getShareUploadsFile()); err != nil {
@@ -171,7 +171,7 @@ func doShareUploadURL(ctx context.Context, objectURL string, isRecursive bool, e
 		return err.Trace(objectURL)
 	}
 
-	printMsg(shareMesssage{
+	printMsg(shareMessage{
 		ObjectURL:   objectURL,
 		ShareURL:    curlCmd,
 		TimeLeft:    expiry,

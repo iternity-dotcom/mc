@@ -26,7 +26,7 @@ import (
 	"github.com/minio/cli"
 	json "github.com/minio/colorjson"
 	"github.com/minio/mc/pkg/probe"
-	"github.com/minio/pkg/console"
+	"github.com/minio/pkg/v3/console"
 )
 
 var tagRemoveFlags = []cli.Flag{
@@ -113,7 +113,7 @@ func (t tagRemoveMessage) JSON() string {
 	return string(msgBytes)
 }
 
-func parseRemoveTagSyntax(ctx *cli.Context) (targetURL, versionID string, timeRef time.Time, withVersions bool, recursive bool) {
+func parseRemoveTagSyntax(ctx *cli.Context) (targetURL, versionID string, timeRef time.Time, withVersions, recursive bool) {
 	if len(ctx.Args()) != 1 {
 		showCommandHelpAndExit(ctx, globalErrorExitStatus)
 	}

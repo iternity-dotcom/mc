@@ -27,7 +27,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/minio/cli"
 	"github.com/minio/mc/pkg/probe"
-	"github.com/minio/pkg/console"
+	"github.com/minio/pkg/v3/console"
 )
 
 // List of all flags supported by find command.
@@ -191,7 +191,7 @@ func checkFindSyntax(ctx context.Context, cliCtx *cli.Context, encKeyDB map[stri
 
 	// Extract input URLs and validate.
 	for _, url := range args {
-		_, _, err := url2Stat(ctx, url, "", false, encKeyDB, time.Time{}, false)
+		_, _, err := url2Stat(ctx, url2StatOptions{urlStr: url, versionID: "", fileAttr: false, encKeyDB: encKeyDB, timeRef: time.Time{}, isZip: false, ignoreBucketExistsCheck: false})
 		if err != nil {
 			// Bucket name empty is a valid error for 'find myminio' unless we are using watch, treat it as such.
 			if _, ok := err.ToGoError().(BucketNameEmpty); ok && !cliCtx.Bool("watch") {
@@ -240,7 +240,7 @@ func mainFind(cliCtx *cli.Context) error {
 	console.SetColor("FindExecErr", color.New(color.FgRed, color.Italic, color.Bold))
 
 	// Parse encryption keys per command.
-	encKeyDB, err := getEncKeys(cliCtx)
+	encKeyDB, err := validateAndCreateEncryptionKeys(cliCtx)
 	fatalIf(err, "Unable to parse encryption keys.")
 
 	checkFindSyntax(ctx, cliCtx, encKeyDB)

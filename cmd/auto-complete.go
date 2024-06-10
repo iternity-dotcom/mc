@@ -58,7 +58,7 @@ func (fs fsComplete) Predict(a complete.Args) []string {
 	return complete.PredictFiles("*").Predict(a)
 }
 
-func completeAdminConfigKeys(aliasPath string, keyPrefix string) (prediction []string) {
+func completeAdminConfigKeys(aliasPath, keyPrefix string) (prediction []string) {
 	// Convert alias/bucket/incompl to alias/bucket/ to list its contents
 	parentDirPath := filepath.Dir(aliasPath) + "/"
 	clnt, err := newAdminClient(parentDirPath)
@@ -266,12 +266,12 @@ var completeCmds = map[string]complete.Predictor{
 	"/encrypt/info":  s3Complete{deepLevel: 2},
 	"/encrypt/clear": s3Complete{deepLevel: 2},
 
-	"/replicate/add":    s3Complete{deepLevel: 2},
-	"/replicate/edit":   s3Complete{deepLevel: 2},
-	"/replicate/update": s3Complete{deepLevel: 2},
-	"/replicate/list":   s3Complete{deepLevel: 2},
-	"/replicate/remove": s3Complete{deepLevel: 2},
-	"/replicate/diff":   s3Complete{deepLevel: 2},
+	"/replicate/add":     s3Complete{deepLevel: 2},
+	"/replicate/edit":    s3Complete{deepLevel: 2},
+	"/replicate/update":  s3Complete{deepLevel: 2},
+	"/replicate/list":    s3Complete{deepLevel: 2},
+	"/replicate/remove":  s3Complete{deepLevel: 2},
+	"/replicate/backlog": s3Complete{deepLevel: 2},
 
 	"/replicate/export":        s3Complete{deepLevel: 2},
 	"/replicate/import":        s3Complete{deepLevel: 2},
@@ -381,6 +381,14 @@ var completeCmds = map[string]complete.Predictor{
 	"/idp/ldap/policy/attach":   aliasCompleter,
 	"/idp/ldap/policy/detach":   aliasCompleter,
 
+	"/idp/ldap/accesskey/create":            aliasCompleter,
+	"/idp/ldap/accesskey/create-with-login": aliasCompleter,
+	"/idp/ldap/accesskey/list":              aliasCompleter,
+	"/idp/ldap/accesskey/ls":                aliasCompleter,
+	"/idp/ldap/accesskey/remove":            aliasCompleter,
+	"/idp/ldap/accesskey/rm":                aliasCompleter,
+	"/idp/ldap/accesskey/info":              aliasCompleter,
+
 	"/admin/policy/info":     aliasCompleter,
 	"/admin/policy/update":   aliasCompleter,
 	"/admin/policy/add":      aliasCompleter,
@@ -425,6 +433,7 @@ var completeCmds = map[string]complete.Predictor{
 
 	"/admin/kms/key/create": aliasCompleter,
 	"/admin/kms/key/status": aliasCompleter,
+	"/admin/kms/key/list":   aliasCompleter,
 
 	"/admin/subnet/health":   aliasCompleter,
 	"/admin/subnet/register": aliasCompleter,
@@ -462,6 +471,7 @@ var completeCmds = map[string]complete.Predictor{
 	"/alias/list":   aliasCompleter,
 	"/alias/remove": aliasCompleter,
 	"/alias/import": nil,
+	"/alias/export": aliasCompleter,
 
 	"/support/callhome":     aliasCompleter,
 	"/support/register":     aliasCompleter,
@@ -478,6 +488,8 @@ var completeCmds = map[string]complete.Predictor{
 	"/support/top/api":      aliasCompleter,
 	"/support/top/drive":    aliasCompleter,
 	"/support/top/disk":     aliasCompleter,
+	"/support/top/net":      aliasCompleter,
+	"/support/upload":       aliasCompleter,
 
 	"/license/register": aliasCompleter,
 	"/license/info":     aliasCompleter,
@@ -497,6 +509,8 @@ var completeCmds = map[string]complete.Predictor{
 	"/quota/set":   aliasCompleter,
 	"/quota/info":  aliasCompleter,
 	"/quota/clear": aliasCompleter,
+	"/put":         complete.PredictOr(s3Completer, fsCompleter),
+	"/get":         complete.PredictOr(s3Completer, fsCompleter),
 }
 
 // flagsToCompleteFlags transforms a cli.Flag to complete.Flags

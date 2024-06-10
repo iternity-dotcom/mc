@@ -20,13 +20,12 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"os"
 	"sync"
 
 	"github.com/fatih/color"
 	"github.com/minio/cli"
 	"github.com/minio/mc/pkg/probe"
-	"github.com/minio/pkg/console"
+	"github.com/minio/pkg/v3/console"
 )
 
 // mv command flags.
@@ -49,16 +48,8 @@ var (
 			Usage: "set storage class for new object(s) on target",
 		},
 		cli.StringFlag{
-			Name:  "encrypt",
-			Usage: "encrypt/decrypt objects (using server-side encryption with server managed keys)",
-		},
-		cli.StringFlag{
 			Name:  "attr",
 			Usage: "add custom metadata for the object",
-		},
-		cli.BoolFlag{
-			Name:  "continue, c",
-			Usage: "create or resume move session",
 		},
 		cli.BoolFlag{
 			Name:  "preserve, a",
@@ -78,7 +69,7 @@ var mvCmd = cli.Command{
 	Action:       mainMove,
 	OnUsageError: onUsageError,
 	Before:       setGlobalsFromContext,
-	Flags:        append(append(mvFlags, ioFlags...), globalFlags...),
+	Flags:        append(append(mvFlags, encFlags...), globalFlags...),
 	CustomHelpTemplate: `NAME:
   {{.HelpName}} - {{.Usage}}
 
@@ -88,9 +79,10 @@ USAGE:
 FLAGS:
   {{range .VisibleFlags}}{{.}}
   {{end}}
+
 ENVIRONMENT VARIABLES:
-  MC_ENCRYPT:      list of comma delimited prefixes
-  MC_ENCRYPT_KEY:  list of comma delimited prefix=secret values
+  MC_ENC_KMS: KMS encryption key in the form of (alias/prefix=key).
+  MC_ENC_S3: S3 encryption key in the form of (alias/prefix=key).
 
 EXAMPLES:
   01. Move a list of objects from local file system to Amazon S3 cloud storage.
@@ -117,30 +109,26 @@ EXAMPLES:
   08. Move a local folder with space separated characters to Amazon S3 cloud storage.
       {{.Prompt}} {{.HelpName}} --recursive 'workdir/documents/May 2014/' s3/miniocloud
 
-  09. Move a folder with encrypted objects recursively from Amazon S3 to MinIO cloud storage.
-      {{.Prompt}} {{.HelpName}} --recursive --encrypt-key "s3/documents/=32byteslongsecretkeymustbegiven1,myminio/documents/=32byteslongsecretkeymustbegiven2" s3/documents/ myminio/documents/
-
-  10. Move a folder with encrypted objects recursively from Amazon S3 to MinIO cloud storage. In case the encryption key contains non-printable character like tab, pass the
-      base64 encoded string as key.
-      {{.Prompt}} {{.HelpName}} --recursive --encrypt-key "s3/documents/=MzJieXRlc2xvbmdzZWNyZWFiY2RlZmcJZ2l2ZW5uMjE=,myminio/documents/=MzJieXRlc2xvbmdzZWNyZWFiY2RlZmcJZ2l2ZW5uMjE=" s3/documents/ myminio/documents/
-
-  11. Move a list of objects from local file system to MinIO cloud storage with specified metadata, separated by ";"
+  09. Move a list of objects from local file system to MinIO cloud storage with specified metadata, separated by ";"
       {{.Prompt}} {{.HelpName}} --attr "key1=value1;key2=value2" Music/*.mp4 play/mybucket/
 
-  12. Move a folder recursively from MinIO cloud storage to Amazon S3 cloud storage with Cache-Control and custom metadata, separated by ";".
+  10. Move a folder recursively from MinIO cloud storage to Amazon S3 cloud storage with Cache-Control and custom metadata, separated by ";".
       {{.Prompt}} {{.HelpName}} --attr "Cache-Control=max-age=90000,min-fresh=9000;key1=value1;key2=value2" --recursive play/mybucket/myfolder/ s3/mybucket/
 
-  13. Move a text file to an object storage and assign REDUCED_REDUNDANCY storage-class to the uploaded object.
+  11. Move a text file to an object storage and assign REDUCED_REDUNDANCY storage-class to the uploaded object.
       {{.Prompt}} {{.HelpName}} --storage-class REDUCED_REDUNDANCY myobject.txt play/mybucket
 
-  14. Move a text file to an object storage and create or resume copy session.
-      {{.Prompt}} {{.HelpName}} --recursive --continue dir/ play/mybucket
-
-  15. Move a text file to an object storage and preserve the file system attribute as metadata.
+  12. Move a text file to an object storage and preserve the file system attribute as metadata.
       {{.Prompt}} {{.HelpName}} -a myobject.txt play/mybucket
 
-  16. Move a text file to an object storage and disable multipart upload feature.
+  13. Move a text file to an object storage and disable multipart upload feature.
       {{.Prompt}} {{.HelpName}} --disable-multipart myobject.txt play/mybucket
+
+  14. Move a folder using client provided encryption keys from Amazon S3 to MinIO cloud storage.
+      {{.Prompt}} {{.HelpName}} --r --enc-c "s3/documents/=MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MBB" --enc-c "myminio/documents/=MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDA" s3/documents/ myminio/documents/
+
+  15. Move a folder using specific server managed encryption keys from Amazon S3 to MinIO cloud storage.
+      {{.Prompt}} {{.HelpName}} --r --enc-s3 "s3/documents/=my-s3-key" --enc-s3 "myminio/documents/=my-minio-key" s3/documents/ myminio/documents/
 `,
 }
 
@@ -215,19 +203,8 @@ func mainMove(cliCtx *cli.Context) error {
 	ctx, cancelMove := context.WithCancel(globalContext)
 	defer cancelMove()
 
-	// Parse encryption keys per command.
-	encKeyDB, err := getEncKeys(cliCtx)
-	fatalIf(err, "Unable to parse encryption keys.")
-
-	// Parse metadata.
-	userMetaMap := make(map[string]string)
-	if cliCtx.String("attr") != "" {
-		userMetaMap, err = getMetaDataEntry(cliCtx.String("attr"))
-		fatalIf(err, "Unable to parse attribute %v", cliCtx.String("attr"))
-	}
-
-	// check 'copy' cli arguments.
-	checkCopySyntax(ctx, cliCtx, encKeyDB, true)
+	checkCopySyntax(cliCtx)
+	console.SetColor("Copy", color.New(color.FgGreen, color.Bold))
 
 	if cliCtx.NArg() == 2 {
 		args := cliCtx.Args()
@@ -238,75 +215,12 @@ func mainMove(cliCtx *cli.Context) error {
 		}
 	}
 
-	// Check if source URLs does not have object locking enabled
-	// since we cannot move them (remove them from the source)
-	for _, urlStr := range cliCtx.Args()[:cliCtx.NArg()-1] {
-		enabled, err := isBucketLockEnabled(ctx, urlStr)
-		if err != nil {
-			fatalIf(err.Trace(), "Unable to get bucket lock configuration of `%s`", urlStr)
-		}
-		if enabled {
-			fatalIf(errDummy().Trace(), fmt.Sprintf("Object lock configuration is enabled on the specified bucket in alias %v.", urlStr))
-		}
-	}
+	var err *probe.Error
 
-	// Additional command speific theme customization.
-	console.SetColor("Copy", color.New(color.FgGreen, color.Bold))
+	encKeyDB, err := validateAndCreateEncryptionKeys(cliCtx)
+	fatalIf(err, "Unable to parse encryption keys.")
 
-	recursive := cliCtx.Bool("recursive")
-	olderThan := cliCtx.String("older-than")
-	newerThan := cliCtx.String("newer-than")
-	storageClass := cliCtx.String("storage-class")
-	sseKeys := os.Getenv("MC_ENCRYPT_KEY")
-	if key := cliCtx.String("encrypt-key"); key != "" {
-		sseKeys = key
-	}
-
-	if sseKeys != "" {
-		sseKeys, err = getDecodedKey(sseKeys)
-		fatalIf(err, "Unable to parse encryption keys.")
-	}
-	sse := cliCtx.String("encrypt")
-
-	var session *sessionV8
-
-	if cliCtx.Bool("continue") {
-		sessionID := getHash("mv", cliCtx.Args())
-		if isSessionExists(sessionID) {
-			session, err = loadSessionV8(sessionID)
-			fatalIf(err.Trace(sessionID), "Unable to load session.")
-		} else {
-			session = newSessionV8(sessionID)
-			session.Header.CommandType = "mv"
-			session.Header.CommandBoolFlags["recursive"] = recursive
-			session.Header.CommandStringFlags["older-than"] = olderThan
-			session.Header.CommandStringFlags["newer-than"] = newerThan
-			session.Header.CommandStringFlags["storage-class"] = storageClass
-			session.Header.CommandStringFlags["encrypt-key"] = sseKeys
-			session.Header.CommandStringFlags["encrypt"] = sse
-			session.Header.CommandBoolFlags["session"] = cliCtx.Bool("continue")
-
-			if cliCtx.Bool("preserve") {
-				session.Header.CommandBoolFlags["preserve"] = cliCtx.Bool("preserve")
-			}
-			session.Header.UserMetaData = userMetaMap
-			session.Header.CommandBoolFlags["disable-multipart"] = cliCtx.Bool("disable-multipart")
-
-			var e error
-			if session.Header.RootPath, e = os.Getwd(); e != nil {
-				session.Delete()
-				fatalIf(probe.NewError(e), "Unable to get current working folder.")
-			}
-
-			// extract URLs.
-			session.Header.CommandArgs = cliCtx.Args()
-		}
-	}
-
-	e := doCopySession(ctx, cancelMove, cliCtx, session, encKeyDB, true)
-	if session != nil {
-		session.Delete()
-	}
+	e := doCopySession(ctx, cancelMove, cliCtx, encKeyDB, true)
 
 	console.Colorize("Copy", "Waiting for move operations to complete")
 	rmManager.close()

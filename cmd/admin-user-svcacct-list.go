@@ -21,7 +21,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/minio/cli"
 	"github.com/minio/mc/pkg/probe"
-	"github.com/minio/pkg/console"
+	"github.com/minio/pkg/v3/console"
 )
 
 var adminUserSvcAcctListCmd = cli.Command{
@@ -80,24 +80,32 @@ func mainAdminUserSvcAcctList(ctx *cli.Context) error {
 	fatalIf(probe.NewError(e).Trace(args...), "Unable to list service accounts")
 
 	if len(svcList.Accounts) > 0 {
-		// Print table header
-		var header string
-		header += console.Colorize("Headers", newPrettyTable(" | ",
-			Field{"AccessKeyHeader", accessFieldMaxLen},
-			Field{"ExpirationHeader", expirationMaxLen},
-		).buildRow("   Access Key", "Expiry"))
-		console.Println(header)
+		if !globalJSON {
+			// Print table header
+			var header string
+			header += console.Colorize("Headers", newPrettyTable(" | ",
+				Field{"AccessKeyHeader", accessFieldMaxLen},
+				Field{"ExpirationHeader", expirationMaxLen},
+			).buildRow("   Access Key", "Expiry"))
+			console.Println(header)
+		}
 
 		// Print table contents
 		for _, svc := range svcList.Accounts {
+			expiration := svc.Expiration
+			if expiration.Equal(timeSentinel) {
+				expiration = nil
+			}
 			printMsg(acctMessage{
 				op:         svcAccOpList,
 				AccessKey:  svc.AccessKey,
-				Expiration: svc.Expiration,
+				Expiration: expiration,
 			})
 		}
 	} else {
-		console.Println("No service accounts found")
+		if !globalJSON {
+			console.Println("No service accounts found")
+		}
 	}
 
 	return nil

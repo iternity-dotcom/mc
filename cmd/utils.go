@@ -29,7 +29,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -37,11 +36,10 @@ import (
 	"github.com/mattn/go-ieproxy"
 	"github.com/minio/madmin-go/v3"
 	"github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/encrypt"
 
 	jwtgo "github.com/golang-jwt/jwt/v4"
 	"github.com/minio/mc/pkg/probe"
-	"github.com/minio/pkg/console"
+	"github.com/minio/pkg/v3/console"
 )
 
 func isErrIgnored(err *probe.Error) (ignored bool) {
@@ -84,6 +82,9 @@ func max(a, b int) int {
 
 // randString generates random names and prepends them with a known prefix.
 func randString(n int, src rand.Source, prefix string) string {
+	if n == 0 {
+		return prefix
+	}
 	b := make([]byte, n)
 	// A rand.Int63() generates 63 random bits, enough for letterIdxMax letters!
 	for i, cache, remain := n-1, src.Int63(), letterIdxMax; i >= 0; {
@@ -97,7 +98,11 @@ func randString(n int, src rand.Source, prefix string) string {
 		cache >>= letterIdxBits
 		remain--
 	}
-	return prefix + string(b[0:30-len(prefix)])
+	x := n / 2
+	if x == 0 {
+		x = 1
+	}
+	return prefix + string(b[0:x])
 }
 
 // printTLSCertInfo prints some fields of the certificates received from the server.
@@ -130,7 +135,7 @@ func splitStr(path, sep string, n int) []string {
 
 // NewS3Config simply creates a new Config struct using the passed
 // parameters.
-func NewS3Config(urlStr string, aliasCfg *aliasConfigV10) *Config {
+func NewS3Config(alias, urlStr string, aliasCfg *aliasConfigV10) *Config {
 	// We have a valid alias and hostConfig. We populate the
 	// credentials from the match found in the config file.
 	s3Config := new(Config)
@@ -145,6 +150,7 @@ func NewS3Config(urlStr string, aliasCfg *aliasConfigV10) *Config {
 	s3Config.DownloadLimit = int64(globalLimitDownload)
 
 	s3Config.HostURL = urlStr
+	s3Config.Alias = alias
 	if aliasCfg != nil {
 		s3Config.AccessKey = aliasCfg.AccessKey
 		s3Config.SecretKey = aliasCfg.SecretKey
@@ -203,108 +209,6 @@ func getLookupType(l string) minio.BucketLookupType {
 		return minio.BucketLookupPath
 	}
 	return minio.BucketLookupAuto
-}
-
-// struct representing object prefix and sse keys association.
-type prefixSSEPair struct {
-	Prefix string
-	SSE    encrypt.ServerSide
-}
-
-// parse and validate encryption keys entered on command line
-func parseAndValidateEncryptionKeys(sseKeys string, sse string) (encMap map[string][]prefixSSEPair, err *probe.Error) {
-	encMap, err = parseEncryptionKeys(sseKeys)
-	if err != nil {
-		return nil, err
-	}
-	if sse != "" {
-		for _, prefix := range strings.Split(sse, ",") {
-			alias, _ := url2Alias(prefix)
-			encMap[alias] = append(encMap[alias], prefixSSEPair{
-				Prefix: prefix,
-				SSE:    encrypt.NewSSE(),
-			})
-		}
-	}
-	for alias, ps := range encMap {
-		if hostCfg := mustGetHostConfig(alias); hostCfg == nil {
-			for _, p := range ps {
-				return nil, probe.NewError(errors.New("SSE prefix " + p.Prefix + " has invalid alias"))
-			}
-		}
-	}
-	return encMap, nil
-}
-
-// parse list of comma separated alias/prefix=sse key values entered on command line and
-// construct a map of alias to prefix and sse pairs.
-func parseEncryptionKeys(sseKeys string) (encMap map[string][]prefixSSEPair, err *probe.Error) {
-	encMap = make(map[string][]prefixSSEPair)
-	if sseKeys == "" {
-		return
-	}
-	prefix := ""
-	index := 0 // start index of prefix
-	vs := 0    // start index of sse-c key
-	sseKeyLen := 32
-	delim := 1
-	k := len(sseKeys)
-	for index < k {
-		i := strings.Index(sseKeys[index:], "=")
-		if i == -1 {
-			return nil, probe.NewError(errors.New("SSE-C prefix should be of the form prefix1=key1,... "))
-		}
-		prefix = sseKeys[index : index+i]
-		alias, _ := url2Alias(prefix)
-		vs = i + 1 + index
-		if vs+32 > k {
-			return nil, probe.NewError(errors.New("SSE-C key should be 32 bytes long"))
-		}
-		if (vs+sseKeyLen < k) && sseKeys[vs+sseKeyLen] != ',' {
-			return nil, probe.NewError(errors.New("SSE-C prefix=secret should be delimited by , and secret should be 32 bytes long"))
-		}
-		sseKey := sseKeys[vs : vs+sseKeyLen]
-		if _, ok := encMap[alias]; !ok {
-			encMap[alias] = make([]prefixSSEPair, 0)
-		}
-		sse, e := encrypt.NewSSEC([]byte(sseKey))
-		if e != nil {
-			return nil, probe.NewError(e)
-		}
-		encMap[alias] = append(encMap[alias], prefixSSEPair{
-			Prefix: prefix,
-			SSE:    sse,
-		})
-		// advance index sseKeyLen + delim bytes for the next key start
-		index = vs + sseKeyLen + delim
-	}
-
-	// Sort encryption keys in descending order of prefix length
-	for _, encKeys := range encMap {
-		sort.Sort(byPrefixLength(encKeys))
-	}
-
-	// Success.
-	return encMap, nil
-}
-
-// byPrefixLength implements sort.Interface.
-type byPrefixLength []prefixSSEPair
-
-func (p byPrefixLength) Len() int { return len(p) }
-func (p byPrefixLength) Less(i, j int) bool {
-	return len(p[i].Prefix) > len(p[j].Prefix)
-}
-func (p byPrefixLength) Swap(i, j int) { p[i], p[j] = p[j], p[i] }
-
-// get SSE Key if object prefix matches with given resource.
-func getSSE(resource string, encKeys []prefixSSEPair) encrypt.ServerSide {
-	for _, k := range encKeys {
-		if strings.HasPrefix(resource, k.Prefix) {
-			return k.SSE
-		}
-	}
-	return nil
 }
 
 // Return true if target url is a part of a source url such as:
@@ -435,7 +339,8 @@ func httpClient(reqTimeout time.Duration) *http.Client {
 			}).DialContext,
 			Proxy: ieproxy.GetProxyFunc(),
 			TLSClientConfig: &tls.Config{
-				RootCAs: globalRootCAs,
+				RootCAs:            globalRootCAs,
+				InsecureSkipVerify: globalInsecure,
 				// Can't use SSLv3 because of POODLE and BEAST
 				// Can't use TLSv1.0 because of POODLE and BEAST using CBC cipher
 				// Can't use TLSv1.1 because of RC4 cipher usage

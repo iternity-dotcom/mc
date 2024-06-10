@@ -28,7 +28,7 @@ import (
 	json "github.com/minio/colorjson"
 	"github.com/minio/mc/pkg/probe"
 	"github.com/minio/minio-go/v7"
-	"github.com/minio/pkg/console"
+	"github.com/minio/pkg/v3/console"
 )
 
 var retentionInfoFlags = []cli.Flag{
@@ -381,7 +381,7 @@ func mainRetentionInfo(cliCtx *cli.Context) error {
 
 	target, versionID, recursive, rewind, withVersions, bucketMode := parseInfoRetentionArgs(cliCtx)
 
-	fatalIfBucketLockNotEnabled(ctx, target)
+	fatalIfBucketLockNotSupported(ctx, target)
 
 	if bucketMode {
 		return showBucketLock(target)

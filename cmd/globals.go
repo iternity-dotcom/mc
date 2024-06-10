@@ -22,12 +22,16 @@ import (
 	"context"
 	"crypto/x509"
 	"net/url"
+	"os"
+	"strconv"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/dustin/go-humanize"
 	"github.com/minio/cli"
 	"github.com/minio/madmin-go/v3"
-	"github.com/minio/pkg/console"
+	"github.com/minio/pkg/v3/console"
+	"github.com/muesli/termenv"
 )
 
 const (
@@ -59,16 +63,20 @@ const (
 )
 
 var (
-	globalQuiet          = false               // Quiet flag set via command line
-	globalJSON           = false               // Json flag set via command line
-	globalJSONLine       = false               // Print json as single line.
-	globalDebug          = false               // Debug flag set via command line
-	globalNoColor        = false               // No Color flag set via command line
-	globalInsecure       = false               // Insecure flag set via command line
-	globalDevMode        = false               // dev flag set via command line
-	globalAirgapped      = false               // Airgapped flag set via command line
-	globalSubnetProxyURL *url.URL              // Proxy to be used for communication with subnet
-	globalSubnetConfig   []madmin.SubsysConfig // Subnet config
+	globalQuiet        = false               // Quiet flag set via command line
+	globalJSON         = false               // Json flag set via command line
+	globalJSONLine     = false               // Print json as single line.
+	globalDebug        = false               // Debug flag set via command line
+	globalNoColor      = false               // No Color flag set via command line
+	globalInsecure     = false               // Insecure flag set via command line
+	globalAirgapped    = false               // Airgapped flag set via command line
+	globalSubnetConfig []madmin.SubsysConfig // Subnet config
+
+	// GlobalDevMode is set to true if the program is running in development mode
+	GlobalDevMode = false
+
+	// GlobalSubnetProxyURL is the proxy to be used for communication with subnet
+	GlobalSubnetProxyURL *url.URL
 
 	globalConnReadDeadline  time.Duration
 	globalConnWriteDeadline time.Duration
@@ -80,14 +88,27 @@ var (
 )
 
 var (
-	// Terminal width
-	globalTermWidth int
+	// Terminal height/width, zero if not found
+	globalTermWidth, globalTermHeight int
 
-	globalHelpPager *termPager
+	globalDisablePagerEnv       = "DISABLE_PAGER"
+	globalDisablePagerFlag      = "--disable-pager"
+	globalDisablePagerFlagShort = "--dp"
+	globalPagerDisabled         = false
+	globalHelpPager             *termPager
 
 	// CA root certificates, a nil value means system certs pool will be used
 	globalRootCAs *x509.CertPool
 )
+
+func parsePagerDisableFlag(args []string) {
+	globalPagerDisabled, _ = strconv.ParseBool(os.Getenv(envPrefix + globalDisablePagerEnv))
+	for _, arg := range args {
+		if arg == globalDisablePagerFlag || arg == globalDisablePagerFlagShort {
+			globalPagerDisabled = true
+		}
+	}
+}
 
 // Set global states. NOTE: It is deliberately kept monolithic to ensure we dont miss out any flags.
 func setGlobalsFromContext(ctx *cli.Context) error {
@@ -105,12 +126,13 @@ func setGlobalsFromContext(ctx *cli.Context) error {
 	globalJSON = globalJSON || json
 	globalNoColor = globalNoColor || noColor || globalJSONLine
 	globalInsecure = globalInsecure || insecure
-	globalDevMode = globalDevMode || devMode
+	GlobalDevMode = GlobalDevMode || devMode
 	globalAirgapped = globalAirgapped || airgapped
 
 	// Disable colorified messages if requested.
 	if globalNoColor || globalQuiet {
 		console.SetColorOff()
+		lipgloss.SetColorProfile(termenv.Ascii)
 	}
 
 	globalConnReadDeadline = ctx.Duration("conn-read-deadline")

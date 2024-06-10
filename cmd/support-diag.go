@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2022 MinIO, Inc.
+// Copyright (c) 2015-2023 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -18,13 +18,13 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	gojson "encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,8 +37,13 @@ import (
 	json "github.com/minio/colorjson"
 	"github.com/minio/madmin-go/v3"
 	"github.com/minio/mc/pkg/probe"
-	"github.com/minio/pkg/console"
-	"github.com/tidwall/gjson"
+	"github.com/minio/pkg/v3/console"
+)
+
+const (
+	anonymizeFlag     = "anonymize"
+	anonymizeStandard = "standard"
+	anonymizeStrict   = "strict"
 )
 
 var supportDiagFlags = append([]cli.Flag{
@@ -55,14 +60,9 @@ var supportDiagFlags = append([]cli.Flag{
 		Hidden: true,
 	},
 	cli.StringFlag{
-		Name:   "license",
-		Usage:  "SUBNET license key",
-		Hidden: true, // deprecated dec 2021
-	},
-	cli.StringFlag{
-		Name:   "name",
-		Usage:  "Specify the name to associate to this MinIO cluster in SUBNET",
-		Hidden: true, // deprecated may 2022
+		Name:  anonymizeFlag,
+		Usage: "Data anonymization mode (standard|strict)",
+		Value: anonymizeStandard,
 	},
 }, subnetCommonFlags...)
 
@@ -73,7 +73,7 @@ var supportDiagCmd = cli.Command{
 	OnUsageError: onUsageError,
 	Action:       mainSupportDiag,
 	Before:       setGlobalsFromContext,
-	Flags:        append(supportDiagFlags, supportGlobalFlags...),
+	Flags:        supportDiagFlags,
 	CustomHelpTemplate: `NAME:
   {{.HelpName}} - {{.Usage}}
 
@@ -89,7 +89,25 @@ EXAMPLES:
 
   2. Generate MinIO diagnostics report for cluster with alias 'myminio', save and upload to SUBNET manually
      {{.Prompt}} {{.HelpName}} myminio --airgap
+
+  3. Upload MinIO diagnostics report for cluster with alias 'myminio' to SUBNET, with strict anonymization
+     {{.Prompt}} {{.HelpName}} myminio --anonymize=strict
 `,
+}
+
+type supportDiagMessage struct {
+	Status string `json:"status"`
+}
+
+// String colorized status message
+func (s supportDiagMessage) String() string {
+	return console.Colorize(supportSuccessMsgTag, "MinIO diagnostics report was successfully uploaded to SUBNET.")
+}
+
+// JSON jsonified status message
+func (s supportDiagMessage) JSON() string {
+	s.Status = "success"
+	return toJSON(s)
 }
 
 // checkSupportDiagSyntax - validate arguments passed by a user
@@ -97,30 +115,22 @@ func checkSupportDiagSyntax(ctx *cli.Context) {
 	if len(ctx.Args()) == 0 || len(ctx.Args()) > 1 {
 		showCommandHelpAndExit(ctx, 1) // last argument is exit code
 	}
+
+	anon := ctx.String(anonymizeFlag)
+	if anon != anonymizeStandard && anon != anonymizeStrict {
+		fatal(errDummy().Trace(), "Invalid anonymization mode. Valid options are 'standard' or 'strict'.")
+	}
 }
 
 // compress and tar MinIO diagnostics output
-func tarGZ(healthInfo interface{}, version string, filename string) error {
-	f, e := os.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0o666)
+func tarGZ(healthInfo interface{}, version, filename string) error {
+	data, e := TarGZHealthInfo(healthInfo, version)
 	if e != nil {
 		return e
 	}
-	defer f.Close()
 
-	gzWriter := gzip.NewWriter(f)
-	defer gzWriter.Close()
-
-	enc := gojson.NewEncoder(gzWriter)
-
-	header := struct {
-		Version string `json:"version"`
-	}{Version: version}
-
-	if e := enc.Encode(header); e != nil {
-		return e
-	}
-
-	if e := enc.Encode(healthInfo); e != nil {
+	e = os.WriteFile(filename, data, 0o666)
+	if e != nil {
 		return e
 	}
 
@@ -133,10 +143,36 @@ func tarGZ(healthInfo interface{}, version string, filename string) error {
 		warningMsgHeader := infoText(warningMsgBoundary)
 		warningMsgTrailer := infoText(warningMsgBoundary)
 		console.Printf("%s\n%s\n%s\n%s\n", warningMsgHeader, warning, warningContents, warningMsgTrailer)
-		console.Infoln("MinIO diagnostics report saved at", filename)
+		console.Infoln("MinIO diagnostics report saved at ", filename)
 	}
 
 	return nil
+}
+
+// TarGZHealthInfo - compress and tar MinIO diagnostics output
+func TarGZHealthInfo(healthInfo interface{}, version string) ([]byte, error) {
+	buffer := bytes.NewBuffer(nil)
+	gzWriter := gzip.NewWriter(buffer)
+
+	enc := gojson.NewEncoder(gzWriter)
+
+	header := struct {
+		Version string `json:"version"`
+	}{Version: version}
+
+	if e := enc.Encode(header); e != nil {
+		return nil, e
+	}
+
+	if e := enc.Encode(healthInfo); e != nil {
+		return nil, e
+	}
+
+	if e := gzWriter.Close(); e != nil {
+		return nil, e
+	}
+
+	return buffer.Bytes(), nil
 }
 
 func infoText(s string) string {
@@ -174,22 +210,23 @@ func mainSupportDiag(ctx *cli.Context) error {
 	return nil
 }
 
-func execSupportDiag(ctx *cli.Context, client *madmin.AdminClient, alias string, apiKey string) {
+func execSupportDiag(ctx *cli.Context, client *madmin.AdminClient, alias, apiKey string) {
 	var reqURL string
 	var headers map[string]string
+	setSuccessMessageColor()
 
 	filename := fmt.Sprintf("%s-health_%s.json.gz", filepath.Clean(alias), UTCNow().Format("20060102150405"))
 	if !globalAirgapped {
 		// Retrieve subnet credentials (login/license) beforehand as
 		// it can take a long time to fetch the health information
-		uploadURL := subnetUploadURL("health", filename)
+		uploadURL := SubnetUploadURL("health")
 		reqURL, headers = prepareSubnetUploadURL(uploadURL, alias, apiKey)
 	}
 
 	healthInfo, version, e := fetchServerDiagInfo(ctx, client)
 	fatalIf(probe.NewError(e), "Unable to fetch health information.")
 
-	if globalJSON {
+	if globalJSON && globalAirgapped {
 		switch version {
 		case madmin.HealthInfoVersion0:
 			printMsg(healthInfo.(madmin.HealthInfoV0))
@@ -205,15 +242,16 @@ func execSupportDiag(ctx *cli.Context, client *madmin.AdminClient, alias string,
 	fatalIf(probe.NewError(e), "Unable to save MinIO diagnostics report")
 
 	if !globalAirgapped {
-		resp, e := uploadFileToSubnet(alias, filename, reqURL, headers)
+		_, e = (&SubnetFileUploader{
+			alias:             alias,
+			FilePath:          filename,
+			ReqURL:            reqURL,
+			Headers:           headers,
+			DeleteAfterUpload: true,
+		}).UploadFileToSubnet()
 		fatalIf(probe.NewError(e), "Unable to upload MinIO diagnostics report to SUBNET portal")
 
-		msg := "MinIO diagnostics report was successfully uploaded to SUBNET."
-		clusterURL, _ := url.PathUnescape(gjson.Get(resp, "cluster_url").String())
-		if len(clusterURL) > 0 {
-			msg += fmt.Sprintf(" Please click here to view our analysis: %s", clusterURL)
-		}
-		console.Infoln(msg)
+		printMsg(supportDiagMessage{})
 	}
 }
 
@@ -234,7 +272,7 @@ func fetchServerDiagInfo(ctx *cli.Context, client *madmin.AdminClient) (interfac
 
 	startSpinner := func(s string) func() {
 		ctx, cancel := context.WithCancel(cont)
-		printText := func(t string, sp string, rewind int) {
+		printText := func(t, sp string, rewind int) {
 			console.RewindLines(rewind)
 
 			dot := infoText(dot)
@@ -335,21 +373,8 @@ func fetchServerDiagInfo(ctx *cli.Context, client *madmin.AdminClient) (interfac
 			admin(len(info.Minio.Info.Servers) > 0)
 	}
 
-	progress := func(info madmin.HealthInfo) {
-		_ = cpu(len(info.Sys.CPUInfo) > 0) &&
-			diskHw(len(info.Sys.Partitions) > 0) &&
-			osInfo(len(info.Sys.OSInfo) > 0) &&
-			mem(len(info.Sys.MemInfo) > 0) &&
-			process(len(info.Sys.ProcInfo) > 0) &&
-			config(info.Minio.Config.Config != nil) &&
-			syserr(len(info.Sys.SysErrs) > 0) &&
-			syssrv(len(info.Sys.SysServices) > 0) &&
-			sysconfig(len(info.Sys.SysConfig) > 0) &&
-			admin(len(info.Minio.Info.Servers) > 0)
-	}
-
 	// Fetch info of all servers (cluster or single server)
-	resp, version, e := client.ServerHealthInfo(cont, *opts, ctx.Duration("deadline"))
+	resp, version, e := client.ServerHealthInfo(cont, *opts, ctx.Duration("deadline"), ctx.String(anonymizeFlag))
 	if e != nil {
 		cancel()
 		return nil, "", e
@@ -399,19 +424,7 @@ func fetchServerDiagInfo(ctx *cli.Context, client *madmin.AdminClient) (interfac
 		}
 		healthInfo = info
 	case madmin.HealthInfoVersion:
-		info := madmin.HealthInfo{}
-		for {
-			if e = decoder.Decode(&info); e != nil {
-				if errors.Is(e, io.EOF) {
-					e = nil
-				}
-
-				break
-			}
-
-			progress(info)
-		}
-		healthInfo = info
+		healthInfo, e = receiveHealthInfo(decoder)
 	}
 
 	// cancel the context if supportDiagChan has returned.

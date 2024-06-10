@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
@@ -38,6 +39,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/klauspost/compress/gzhttp"
+	"github.com/minio/pkg/v3/env"
+
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/minio/minio-go/v7/pkg/encrypt"
@@ -48,7 +52,7 @@ import (
 	"github.com/minio/minio-go/v7/pkg/s3utils"
 	"github.com/minio/minio-go/v7/pkg/sse"
 	"github.com/minio/minio-go/v7/pkg/tags"
-	"github.com/minio/pkg/mimedb"
+	"github.com/minio/pkg/v3/mimedb"
 
 	"github.com/minio/mc/pkg/deadlineconn"
 	"github.com/minio/mc/pkg/httptracer"
@@ -88,6 +92,8 @@ const (
 	AmzObjectLockRetainUntilDate = "X-Amz-Object-Lock-Retain-Until-Date"
 	// AmzObjectLockLegalHold sets object lock legal hold
 	AmzObjectLockLegalHold = "X-Amz-Object-Lock-Legal-Hold"
+	amzObjectSSEKMSKeyID   = "X-Amz-Server-Side-Encryption-Aws-Kms-Key-Id"
+	amzObjectSSE           = "X-Amz-Server-Side-Encryption"
 )
 
 type dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
@@ -115,6 +121,146 @@ func newCustomDialContext(c *Config) dialContext {
 
 var timeSentinel = time.Unix(0, 0).UTC()
 
+// getConfigHash returns the Hash for che *Config
+func getConfigHash(config *Config) uint32 {
+	// Creates a parsed URL.
+	targetURL := newClientURL(config.HostURL)
+
+	// Save if target supports virtual host style.
+	hostName := targetURL.Host
+
+	// Generate a hash out of s3Conf.
+	confHash := fnv.New32a()
+	confHash.Write([]byte(hostName + config.AccessKey + config.SecretKey + config.SessionToken))
+	confSum := confHash.Sum32()
+	return confSum
+}
+
+// isHostTLS returns true if the Host URL is https
+func isHostTLS(config *Config) bool {
+	// By default enable HTTPs.
+	useTLS := true
+	targetURL := newClientURL(config.HostURL)
+	if targetURL.Scheme == "http" {
+		useTLS = false
+	}
+	return useTLS
+}
+
+// getTransportForConfig returns a corresponding *http.Transport for the *Config
+// set withS3v2 bool to true to add traceV2 tracer.
+func getTransportForConfig(config *Config, withS3v2 bool) http.RoundTripper {
+	var transport http.RoundTripper
+
+	useTLS := isHostTLS(config)
+
+	if config.Transport != nil {
+		transport = config.Transport
+	} else {
+		tr := &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           newCustomDialContext(config),
+			MaxIdleConnsPerHost:   1024,
+			WriteBufferSize:       32 << 10, // 32KiB moving up from 4KiB default
+			ReadBufferSize:        32 << 10, // 32KiB moving up from 4KiB default
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 10 * time.Second,
+			// Set this value so that the underlying transport round-tripper
+			// doesn't try to auto decode the body of objects with
+			// content-encoding set to `gzip`.
+			//
+			// Refer:
+			//    https://golang.org/src/net/http/transport.go?h=roundTrip#L1843
+			DisableCompression: true,
+		}
+		if useTLS {
+			// Keep TLS config.
+			tlsConfig := &tls.Config{
+				RootCAs: globalRootCAs,
+				// Can't use SSLv3 because of POODLE and BEAST
+				// Can't use TLSv1.0 because of POODLE and BEAST using CBC cipher
+				// Can't use TLSv1.1 because of RC4 cipher usage
+				MinVersion: tls.VersionTLS12,
+			}
+			if config.Insecure {
+				tlsConfig.InsecureSkipVerify = true
+			}
+			tr.TLSClientConfig = tlsConfig
+
+			// Because we create a custom TLSClientConfig, we have to opt-in to HTTP/2.
+			// See https://github.com/golang/go/issues/14275
+			//
+			// TODO: Enable http2.0 when upstream issues related to HTTP/2 are fixed.
+			//
+			// if e = http2.ConfigureTransport(tr); e != nil {
+			// 	return nil, probe.NewError(e)
+			// }
+		}
+		transport = tr
+	}
+
+	transport = limiter.New(config.UploadLimit, config.DownloadLimit, transport)
+
+	if config.Debug {
+		if strings.EqualFold(config.Signature, "S3v4") {
+			transport = httptracer.GetNewTraceTransport(newTraceV4(), transport)
+		} else if strings.EqualFold(config.Signature, "S3v2") && withS3v2 {
+			transport = httptracer.GetNewTraceTransport(newTraceV2(), transport)
+		}
+	}
+	transport = gzhttp.Transport(transport)
+	return transport
+}
+
+// getCredentialsChainForConfig returns an []credentials.Provider array for the config
+// and the STS configuration (if present)
+func getCredentialsChainForConfig(config *Config, transport http.RoundTripper) ([]credentials.Provider, *probe.Error) {
+	var credsChain []credentials.Provider
+	// if an STS endpoint is set, we will add that to the chain
+	if stsEndpoint := env.Get("MC_STS_ENDPOINT_"+config.Alias, ""); stsEndpoint != "" {
+		// set AWS_WEB_IDENTITY_TOKEN_FILE is MC_WEB_IDENTITY_TOKEN_FILE is set
+		if val := env.Get("MC_WEB_IDENTITY_TOKEN_FILE_"+config.Alias, ""); val != "" {
+			os.Setenv("AWS_WEB_IDENTITY_TOKEN_FILE", val)
+			if val := env.Get("MC_ROLE_ARN_"+config.Alias, ""); val != "" {
+				os.Setenv("AWS_ROLE_ARN", val)
+			}
+			if val := env.Get("MC_ROLE_SESSION_NAME_"+config.Alias, randString(32, rand.NewSource(time.Now().UnixNano()), "mc-session-name-")); val != "" {
+				os.Setenv("AWS_ROLE_SESSION_NAME", val)
+			}
+		}
+
+		stsEndpointURL, err := url.Parse(stsEndpoint)
+		if err != nil {
+			return nil, probe.NewError(fmt.Errorf("Error parsing sts endpoint: %v", err))
+		}
+		credsSts := &credentials.IAM{
+			Client: &http.Client{
+				Transport: transport,
+			},
+			Endpoint: stsEndpointURL.String(),
+		}
+		credsChain = append(credsChain, credsSts)
+	}
+
+	signType := credentials.SignatureV4
+	if strings.EqualFold(config.Signature, "s3v2") {
+		signType = credentials.SignatureV2
+	}
+
+	// Credentials
+	creds := &credentials.Static{
+		Value: credentials.Value{
+			AccessKeyID:     config.AccessKey,
+			SecretAccessKey: config.SecretKey,
+			SessionToken:    config.SessionToken,
+			SignerType:      signType,
+		},
+	}
+	credsChain = append(credsChain, creds)
+	return credsChain, nil
+}
+
 // newFactory encloses New function with client cache.
 func newFactory() func(config *Config) (Client, *probe.Error) {
 	clientCache := make(map[uint32]*minio.Client)
@@ -124,19 +270,19 @@ func newFactory() func(config *Config) (Client, *probe.Error) {
 	return func(config *Config) (Client, *probe.Error) {
 		// Creates a parsed URL.
 		targetURL := newClientURL(config.HostURL)
-		// By default enable HTTPs.
-		useTLS := true
-		if targetURL.Scheme == "http" {
-			useTLS = false
-		}
+
+		// Save if target supports virtual host style.
+		hostName := targetURL.Host
+
+		confSum := getConfigHash(config)
+
+		useTLS := isHostTLS(config)
 
 		// Instantiate s3
 		s3Clnt := &S3Client{}
 		// Save the target URL.
 		s3Clnt.targetURL = targetURL
 
-		// Save if target supports virtual host style.
-		hostName := targetURL.Host
 		s3Clnt.virtualStyle = isVirtualHostStyle(hostName, config.Lookup)
 		isS3AcceleratedEndpoint := isAmazonAccelerated(hostName)
 
@@ -147,89 +293,26 @@ func newFactory() func(config *Config) (Client, *probe.Error) {
 			}
 		}
 
-		// Generate a hash out of s3Conf.
-		confHash := fnv.New32a()
-		confHash.Write([]byte(hostName + config.AccessKey + config.SecretKey + config.SessionToken))
-		confSum := confHash.Sum32()
-
 		// Lookup previous cache by hash.
 		mutex.Lock()
 		defer mutex.Unlock()
 		var api *minio.Client
 		var found bool
 		if api, found = clientCache[confSum]; !found {
-			// if Signature version '4' use NewV4 directly.
-			creds := credentials.NewStaticV4(config.AccessKey, config.SecretKey, config.SessionToken)
-			// if Signature version '2' use NewV2 directly.
-			if strings.ToUpper(config.Signature) == "S3V2" {
-				creds = credentials.NewStaticV2(config.AccessKey, config.SecretKey, "")
+
+			transport := getTransportForConfig(config, true)
+
+			credsChain, err := getCredentialsChainForConfig(config, transport)
+			if err != nil {
+				return nil, err
 			}
 
-			var transport http.RoundTripper
-
-			if config.Transport != nil {
-				transport = config.Transport
-			} else {
-				tr := &http.Transport{
-					Proxy:                 http.ProxyFromEnvironment,
-					DialContext:           newCustomDialContext(config),
-					MaxIdleConnsPerHost:   1024,
-					WriteBufferSize:       32 << 10, // 32KiB moving up from 4KiB default
-					ReadBufferSize:        32 << 10, // 32KiB moving up from 4KiB default
-					IdleConnTimeout:       90 * time.Second,
-					TLSHandshakeTimeout:   10 * time.Second,
-					ExpectContinueTimeout: 10 * time.Second,
-					// Set this value so that the underlying transport round-tripper
-					// doesn't try to auto decode the body of objects with
-					// content-encoding set to `gzip`.
-					//
-					// Refer:
-					//    https://golang.org/src/net/http/transport.go?h=roundTrip#L1843
-					DisableCompression: true,
-				}
-				if useTLS {
-					// Keep TLS config.
-					tlsConfig := &tls.Config{
-						RootCAs: globalRootCAs,
-						// Can't use SSLv3 because of POODLE and BEAST
-						// Can't use TLSv1.0 because of POODLE and BEAST using CBC cipher
-						// Can't use TLSv1.1 because of RC4 cipher usage
-						MinVersion: tls.VersionTLS12,
-					}
-					if config.Insecure {
-						tlsConfig.InsecureSkipVerify = true
-					}
-					tr.TLSClientConfig = tlsConfig
-
-					// Because we create a custom TLSClientConfig, we have to opt-in to HTTP/2.
-					// See https://github.com/golang/go/issues/14275
-					//
-					// TODO: Enable http2.0 when upstream issues related to HTTP/2 are fixed.
-					//
-					// if e = http2.ConfigureTransport(tr); e != nil {
-					// 	return nil, probe.NewError(e)
-					// }
-				}
-				transport = tr
-			}
-
-			transport = limiter.New(config.UploadLimit, config.DownloadLimit, transport)
-
-			if config.Debug {
-				if strings.EqualFold(config.Signature, "S3v4") {
-					transport = httptracer.GetNewTraceTransport(newTraceV4(), transport)
-				} else if strings.EqualFold(config.Signature, "S3v2") {
-					transport = httptracer.GetNewTraceTransport(newTraceV2(), transport)
-				}
-			}
-
-			// Not found. Instantiate a new MinIO
 			var e error
 
 			options := minio.Options{
-				Creds:        creds,
+				Creds:        credentials.NewChainCredentials(credsChain),
 				Secure:       useTLS,
-				Region:       os.Getenv("MC_REGION"),
+				Region:       env.Get("MC_REGION", env.Get("AWS_REGION", "")),
 				BucketLookup: config.Lookup,
 				Transport:    transport,
 			}
@@ -297,6 +380,9 @@ func (c *S3Client) AddNotificationConfig(ctx context.Context, arn string, events
 		case "ilm":
 			nc.AddEvents(notification.EventType("s3:ObjectRestore:*"))
 			nc.AddEvents(notification.EventType("s3:ObjectTransition:*"))
+		case "scanner":
+			nc.AddEvents(notification.EventType("s3:Scanner:ManyVersions"))
+			nc.AddEvents(notification.EventType("s3:Scanner:BigPrefix"))
 		default:
 			return errInvalidArgument().Trace(events...)
 		}
@@ -336,7 +422,7 @@ func (c *S3Client) AddNotificationConfig(ctx context.Context, arn string, events
 }
 
 // RemoveNotificationConfig - Remove bucket notification
-func (c *S3Client) RemoveNotificationConfig(ctx context.Context, arn string, event string, prefix string, suffix string) *probe.Error {
+func (c *S3Client) RemoveNotificationConfig(ctx context.Context, arn, event, prefix, suffix string) *probe.Error {
 	bucket, _ := c.url2BucketAndObject()
 	// Remove all notification configs if arn is empty
 	if arn == "" {
@@ -375,6 +461,9 @@ func (c *S3Client) RemoveNotificationConfig(ctx context.Context, arn string, eve
 			case "ilm":
 				eventsTyped = append(eventsTyped, notification.EventType("s3:ObjectRestore:*"))
 				eventsTyped = append(eventsTyped, notification.EventType("s3:ObjectTransition:*"))
+			case "scanner":
+				eventsTyped = append(eventsTyped, notification.EventType("s3:Scanner:ManyVersions"))
+				eventsTyped = append(eventsTyped, notification.EventType("s3:Scanner:BigPrefix"))
 			default:
 				return errInvalidArgument().Trace(events...)
 			}
@@ -785,6 +874,8 @@ func (c *S3Client) Watch(ctx context.Context, options WatchOptions) (*WatchObjec
 			events = append(events, string(notification.BucketCreatedAll))
 		case "bucket-removal":
 			events = append(events, string(notification.BucketRemovedAll))
+		case "scanner":
+			events = append(events, "s3:Scanner:ManyVersions", "s3:Scanner:BigPrefix")
 		default:
 			return nil, errInvalidArgument().Trace(event)
 		}
@@ -844,7 +935,7 @@ func (c *S3Client) Watch(ctx context.Context, options WatchOptions) (*WatchObjec
 }
 
 // Get - get object with GET options.
-func (c *S3Client) Get(ctx context.Context, opts GetOptions) (io.ReadCloser, *probe.Error) {
+func (c *S3Client) Get(ctx context.Context, opts GetOptions) (io.ReadCloser, *ClientContent, *probe.Error) {
 	bucket, object := c.url2BucketAndObject()
 	o := minio.GetObjectOptions{
 		ServerSideEncryption: opts.SSE,
@@ -856,29 +947,32 @@ func (c *S3Client) Get(ctx context.Context, opts GetOptions) (io.ReadCloser, *pr
 	if opts.RangeStart != 0 {
 		err := o.SetRange(opts.RangeStart, 0)
 		if err != nil {
-			return nil, probe.NewError(err)
+			return nil, nil, probe.NewError(err)
 		}
 	}
+	// Disallow automatic decompression for some objects with content-encoding set.
+	o.Set("Accept-Encoding", "identity")
 
-	reader, e := c.api.GetObject(ctx, bucket, object, o)
+	cr := minio.Core{Client: c.api}
+	reader, objectInfo, _, e := cr.GetObject(ctx, bucket, object, o)
 	if e != nil {
 		errResponse := minio.ToErrorResponse(e)
 		if errResponse.Code == "NoSuchBucket" {
-			return nil, probe.NewError(BucketDoesNotExist{
+			return nil, nil, probe.NewError(BucketDoesNotExist{
 				Bucket: bucket,
 			})
 		}
 		if errResponse.Code == "InvalidBucketName" {
-			return nil, probe.NewError(BucketInvalid{
+			return nil, nil, probe.NewError(BucketInvalid{
 				Bucket: bucket,
 			})
 		}
 		if errResponse.Code == "NoSuchKey" {
-			return nil, probe.NewError(ObjectMissing{})
+			return nil, nil, probe.NewError(ObjectMissing{})
 		}
-		return nil, probe.NewError(e)
+		return nil, nil, probe.NewError(e)
 	}
-	return reader, nil
+	return reader, c.objectInfo2ClientContent(bucket, objectInfo), nil
 }
 
 // Copy - copy object, uses server side copy API. Also uses an abstracted API
@@ -1140,7 +1234,7 @@ func (c *S3Client) removeIncompleteObjects(ctx context.Context, bucket string, o
 }
 
 // AddUserAgent - add custom user agent.
-func (c *S3Client) AddUserAgent(app string, version string) {
+func (c *S3Client) AddUserAgent(app, version string) {
 	c.api.SetAppInfo(app, version)
 }
 
@@ -1508,7 +1602,7 @@ func (c *S3Client) SetAccess(ctx context.Context, bucketPolicy string, isJSON bo
 }
 
 // listObjectWrapper - select ObjectList mode depending on arguments
-func (c *S3Client) listObjectWrapper(ctx context.Context, bucket, object string, isRecursive bool, timeRef time.Time, withVersions, withDeleteMarkers bool, metadata bool, maxKeys int, zip bool) <-chan minio.ObjectInfo {
+func (c *S3Client) listObjectWrapper(ctx context.Context, bucket, object string, isRecursive bool, timeRef time.Time, withVersions, withDeleteMarkers, metadata bool, maxKeys int, zip bool) <-chan minio.ObjectInfo {
 	if !timeRef.IsZero() || withVersions {
 		return c.listVersions(ctx, bucket, object, ListOptions{Recursive: isRecursive, TimeRef: timeRef, WithOlderVersions: withVersions, WithDeleteMarkers: withDeleteMarkers})
 	}
@@ -1581,7 +1675,7 @@ func (c *S3Client) Stat(ctx context.Context, opts StatOptions) (*ClientContent, 
 	}
 
 	if path == "" {
-		content, err := c.bucketStat(ctx, bucket)
+		content, err := c.bucketStat(ctx, BucketStatOptions{bucket: bucket, ignoreBucketExists: opts.ignoreBucketExists})
 		if err != nil {
 			return nil, err.Trace(bucket)
 		}
@@ -2150,7 +2244,7 @@ func (c *S3Client) bucketInfo2ClientContent(bucket minio.BucketInfo) *ClientCont
 }
 
 // Convert objectInfo to ClientContent
-func (c *S3Client) prefixInfo2ClientContent(bucket string, prefix string) *ClientContent {
+func (c *S3Client) prefixInfo2ClientContent(bucket, prefix string) *ClientContent {
 	// Join bucket and incoming object key.
 	if bucket == "" {
 		panic("should never happen, bucket cannot be empty")
@@ -2226,16 +2320,18 @@ func (c *S3Client) objectInfo2ClientContent(bucket string, entry minio.ObjectInf
 }
 
 // Returns bucket stat info of current bucket.
-func (c *S3Client) bucketStat(ctx context.Context, bucket string) (*ClientContent, *probe.Error) {
-	exists, e := c.api.BucketExists(ctx, bucket)
-	if e != nil {
-		return nil, probe.NewError(e)
-	}
-	if !exists {
-		return nil, probe.NewError(BucketDoesNotExist{Bucket: bucket})
+func (c *S3Client) bucketStat(ctx context.Context, opts BucketStatOptions) (*ClientContent, *probe.Error) {
+	if !opts.ignoreBucketExists {
+		exists, e := c.api.BucketExists(ctx, opts.bucket)
+		if e != nil {
+			return nil, probe.NewError(e)
+		}
+		if !exists {
+			return nil, probe.NewError(BucketDoesNotExist{Bucket: opts.bucket})
+		}
 	}
 	return &ClientContent{
-		URL: c.targetURL.Clone(), BucketName: bucket, Time: time.Unix(0, 0), Type: os.ModeDir,
+		URL: c.targetURL.Clone(), BucketName: opts.bucket, Time: time.Unix(0, 0), Type: os.ModeDir,
 	}, nil
 }
 
@@ -2261,7 +2357,7 @@ func (c *S3Client) listInRoutine(ctx context.Context, contentCh chan *ClientCont
 			contentCh <- c.bucketInfo2ClientContent(bucket)
 		}
 	case b != "" && !strings.HasSuffix(c.targetURL.Path, string(c.targetURL.Separator)) && o == "":
-		content, err := c.bucketStat(ctx, b)
+		content, err := c.bucketStat(ctx, BucketStatOptions{bucket: b})
 		if err != nil {
 			contentCh <- &ClientContent{Err: err.Trace(b)}
 			return
@@ -2751,15 +2847,15 @@ func (c *S3Client) SetReplication(ctx context.Context, cfg *replication.Config, 
 }
 
 // GetReplicationMetrics - Get replication metrics for a given bucket.
-func (c *S3Client) GetReplicationMetrics(ctx context.Context) (replication.Metrics, *probe.Error) {
+func (c *S3Client) GetReplicationMetrics(ctx context.Context) (replication.MetricsV2, *probe.Error) {
 	bucket, _ := c.url2BucketAndObject()
 	if bucket == "" {
-		return replication.Metrics{}, probe.NewError(BucketNameEmpty{})
+		return replication.MetricsV2{}, probe.NewError(BucketNameEmpty{})
 	}
 
-	metrics, e := c.api.GetBucketReplicationMetrics(ctx, bucket)
+	metrics, e := c.api.GetBucketReplicationMetricsV2(ctx, bucket)
 	if e != nil {
-		return replication.Metrics{}, probe.NewError(e)
+		return replication.MetricsV2{}, probe.NewError(e)
 	}
 	return metrics, nil
 }
@@ -2815,7 +2911,7 @@ func (c *S3Client) GetEncryption(ctx context.Context) (algorithm, keyID string, 
 }
 
 // SetEncryption - Set encryption configuration on a bucket
-func (c *S3Client) SetEncryption(ctx context.Context, encType string, kmsKeyID string) *probe.Error {
+func (c *S3Client) SetEncryption(ctx context.Context, encType, kmsKeyID string) *probe.Error {
 	bucket, _ := c.url2BucketAndObject()
 	if bucket == "" {
 		return probe.NewError(BucketNameEmpty{})
@@ -2857,7 +2953,7 @@ func (c *S3Client) GetBucketInfo(ctx context.Context) (BucketInfo, *probe.Error)
 	if object != "" {
 		return b, probe.NewError(InvalidArgument{})
 	}
-	content, err := c.bucketStat(ctx, bucket)
+	content, err := c.bucketStat(ctx, BucketStatOptions{bucket: bucket})
 	if err != nil {
 		return b, err.Trace(bucket)
 	}
