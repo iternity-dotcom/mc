@@ -1048,7 +1048,7 @@ function run_test() {
 		test_watch_object
 	fi
 
-	if [ "$ENABLE_HTTPS" == "1"  && "$SKIP_SSE_TESTS" != "1" ]; then
+	if [ "$ENABLE_HTTPS" == "1" && "$SKIP_SSE_TESTS" != "1" ]; then
 		test_put_object_with_sse
 		test_put_object_with_sse_error
 		test_put_object_multipart_sse
