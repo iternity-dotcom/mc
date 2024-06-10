@@ -28,8 +28,9 @@
 #   as MinIO server.
 #
 # * For other, call this script with environment variables MINT_MODE,
-#   MINT_DATA_DIR, SERVER_ENDPOINT, ACCESS_KEY, SECRET_KEY and ENABLE_HTTPS. It
-#   uses mc executable binary in current working directory and uses given MinIO
+#   MINT_DATA_DIR, SERVER_ENDPOINT, ACCESS_KEY, SECRET_KEY, ENABLE_HTTPS,
+#   SKIP_SSE_TESTS and ENABLE_SSE_S3TESTS.
+#   It uses mc executable binary in current working directory and uses given MinIO
 #   server to run tests. MINT_MODE is set by mint to specify what category of
 #   tests to run.
 #
@@ -1047,7 +1048,7 @@ function run_test() {
 		test_watch_object
 	fi
 
-	if [ "$ENABLE_HTTPS" == "1" ]; then
+	if [ "$ENABLE_HTTPS" == "1"  && "$SKIP_SSE_TESTS" != "1" ]; then
 		test_put_object_with_sse
 		test_put_object_with_sse_error
 		test_put_object_multipart_sse
