@@ -73,13 +73,6 @@ func UTCNow() time.Time {
 	return time.Now().UTC()
 }
 
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
 // randString generates random names and prepends them with a known prefix.
 func randString(n int, src rand.Source, prefix string) string {
 	if n == 0 {
@@ -182,7 +175,16 @@ func isOlder(ti time.Time, olderRef string) bool {
 	}
 	objectAge := time.Since(ti)
 	olderThan, e := ParseDuration(olderRef)
-	fatalIf(probe.NewError(e), "Unable to parse olderThan=`"+olderRef+"`.")
+	if e != nil {
+		for _, format := range rewindSupportedFormat {
+			if t, e2 := time.Parse(format, olderRef); e2 == nil {
+				olderThan = Duration(time.Since(t))
+				e = nil
+				break
+			}
+		}
+	}
+	fatalIf(probe.NewError(e), "Unable to parse olderThan=`"+olderRef+"`. Supply relative '7d6h2m' or absolute '"+printDate+"'.")
 	return objectAge < time.Duration(olderThan)
 }
 
@@ -194,7 +196,16 @@ func isNewer(ti time.Time, newerRef string) bool {
 
 	objectAge := time.Since(ti)
 	newerThan, e := ParseDuration(newerRef)
-	fatalIf(probe.NewError(e), "Unable to parse newerThan=`"+newerRef+"`.")
+	if e != nil {
+		for _, format := range rewindSupportedFormat {
+			if t, e2 := time.Parse(format, newerRef); e2 == nil {
+				newerThan = Duration(time.Since(t))
+				e = nil
+				break
+			}
+		}
+	}
+	fatalIf(probe.NewError(e), "Unable to parse newerThan=`"+newerRef+"`. Supply relative '7d6h2m' or absolute '"+printDate+"'.")
 	return objectAge >= time.Duration(newerThan)
 }
 
@@ -365,4 +376,22 @@ func getPrometheusToken(hostConfig *aliasConfigV10) (string, error) {
 		return "", e
 	}
 	return token, nil
+}
+
+// conservativeFileName returns a conservative file name
+func conservativeFileName(s string) string {
+	return strings.Trim(strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return r
+		case r >= 'A' && r <= 'Z':
+			return r
+		case r >= '0' && r <= '9':
+			return r
+		case strings.ContainsAny(string(r), "+-_%()[]!@"):
+			return r
+		default:
+			return '_'
+		}
+	}, s), "_")
 }

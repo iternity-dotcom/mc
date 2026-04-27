@@ -83,27 +83,27 @@ func (i srRemoveStatus) String() string {
 	if i.RemoveAll {
 		return console.Colorize("UserMessage", "All site(s) were removed successfully")
 	}
-	if i.ReplicateRemoveStatus.Status == madmin.ReplicateRemoveStatusSuccess {
+	if i.Status == madmin.ReplicateRemoveStatusSuccess {
 		return console.Colorize("UserMessage", fmt.Sprintf("Following site(s) %s were removed successfully", i.sites))
 	}
 	if len(i.sites) == 1 {
-		return console.Colorize("UserMessage", fmt.Sprintf("Following site %s was removed partially, some operations failed:\nERROR: '%s'", i.sites, i.ReplicateRemoveStatus.ErrDetail))
+		return console.Colorize("UserMessage", fmt.Sprintf("Following site %s was removed partially, some operations failed:\nERROR: '%s'", i.sites, i.ErrDetail))
 	}
-	return console.Colorize("UserMessage", fmt.Sprintf("Following site(s) %s were removed partially, some operations failed: \nERROR: '%s'", i.sites, i.ReplicateRemoveStatus.ErrDetail))
+	return console.Colorize("UserMessage", fmt.Sprintf("Following site(s) %s were removed partially, some operations failed: \nERROR: '%s'", i.sites, i.ErrDetail))
 }
 
 func checkAdminReplicateRemoveSyntax(ctx *cli.Context) {
 	// Check argument count
 	argsNr := len(ctx.Args())
-	if ctx.IsSet("all") && argsNr > 1 {
+	if ctx.Bool("all") && argsNr > 1 {
 		fatalIf(errInvalidArgument().Trace(ctx.Args().Tail()...),
 			"")
 	}
-	if argsNr < 2 && !ctx.IsSet("all") {
+	if argsNr < 2 && !ctx.Bool("all") {
 		fatalIf(errInvalidArgument().Trace(ctx.Args().Tail()...),
 			"Need at least two arguments to remove command.")
 	}
-	if !ctx.IsSet("force") {
+	if !ctx.Bool("force") {
 		fatalIf(errDummy().Trace(),
 			"Site removal requires --force flag. This operation is *IRREVERSIBLE*. Please review carefully before performing this *DANGEROUS* operation.")
 	}

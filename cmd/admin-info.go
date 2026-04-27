@@ -36,13 +36,20 @@ import (
 	"github.com/minio/pkg/v3/console"
 )
 
+var adminInfoFlags = []cli.Flag{
+	cli.BoolFlag{
+		Name:  "offline",
+		Usage: "show only offline nodes/drives",
+	},
+}
+
 var adminInfoCmd = cli.Command{
 	Name:         "info",
 	Usage:        "display MinIO server information",
 	Action:       mainAdminInfo,
 	OnUsageError: onUsageError,
 	Before:       setGlobalsFromContext,
-	Flags:        globalFlags,
+	Flags:        append(globalFlags, adminInfoFlags...),
 	CustomHelpTemplate: `NAME:
   {{.HelpName}} - {{.Usage}}
 
@@ -88,9 +95,11 @@ func clusterSummaryInfo(info madmin.InfoMessage) clusterInfo {
 				}
 			}
 
-			if disk.DiskIndex < (info.Backend.DrivesPerSet[disk.PoolIndex] - info.Backend.StandardSCParity) {
-				pool.drivesTotalFreeSpace += disk.AvailableSpace
-				pool.drivesTotalUsableSpace += disk.TotalSpace
+			if len(info.Backend.DrivesPerSet) > 0 {
+				if disk.DiskIndex < (info.Backend.DrivesPerSet[disk.PoolIndex] - info.Backend.StandardSCParity) {
+					pool.drivesTotalFreeSpace += disk.AvailableSpace
+					pool.drivesTotalUsableSpace += disk.TotalSpace
+				}
 			}
 
 			pool.endpoints.Add(srv.Endpoint)
@@ -98,8 +107,6 @@ func clusterSummaryInfo(info madmin.InfoMessage) clusterInfo {
 		}
 	}
 
-	// This was already added in 2022 enough time has passed to remove
-	// any other deprecated calculations
 	for idx := range info.Backend.TotalSets {
 		pool := summary[idx]
 		if pool != nil {
@@ -127,6 +134,8 @@ type clusterStruct struct {
 	Status string             `json:"status"`
 	Error  string             `json:"error,omitempty"`
 	Info   madmin.InfoMessage `json:"info,omitempty"`
+
+	onlyOffline bool
 }
 
 // String provides colorized info messages
@@ -139,11 +148,6 @@ func (u clusterStruct) String() (msg string) {
 	// If nothing has been collected, error out
 	if u.Info.Servers == nil {
 		fatal(probe.NewError(errors.New("Unable to get service info")), "")
-	}
-
-	// Validate such that we expect the server to be atleast from 2022
-	if len(u.Info.Backend.TotalSets) == 0 || len(u.Info.Backend.DrivesPerSet) == 0 {
-		fatal(probe.NewError(errors.New("Unable to display service info, server is too old")), "")
 	}
 
 	// Initialization
@@ -199,6 +203,10 @@ func (u clusterStruct) String() (msg string) {
 			msg += "\n"
 
 			// Continue to the next server
+			continue
+		}
+
+		if u.onlyOffline {
 			continue
 		}
 
@@ -286,6 +294,7 @@ func (u clusterStruct) String() (msg string) {
 			"Erasure sets",
 		})
 
+		var printSummary bool
 		// Keep the pool order while printing the output
 		for poolIdx := 0; poolIdx < len(clusterSummary); poolIdx++ {
 			summary := clusterSummary[poolIdx]
@@ -295,10 +304,12 @@ func (u clusterStruct) String() (msg string) {
 			totalSize := summary.drivesTotalUsableSpace
 			usedCurrent := summary.drivesTotalUsableSpace - summary.drivesTotalFreeSpace
 			var capacity string
-			if totalSize == 0 {
-				capacity = "0% (total: 0B)"
-			} else {
+			if totalSize > 0 {
 				capacity = fmt.Sprintf("%.1f%% (total: %s)", 100*float64(usedCurrent)/float64(totalSize), humanize.IBytes(totalSize))
+			}
+
+			if summary.drivesPerSet > 0 {
+				printSummary = true
 			}
 
 			cellText = append(cellText, []string{
@@ -309,10 +320,12 @@ func (u clusterStruct) String() (msg string) {
 			})
 		}
 
-		e := tbl.PopulateTable(&builder, cellText)
-		fatalIf(probe.NewError(e), "unable to populate the table")
+		if printSummary {
+			e := tbl.PopulateTable(&builder, cellText)
+			fatalIf(probe.NewError(e), "unable to populate the table")
 
-		msg += builder.String() + "\n"
+			msg += builder.String() + "\n"
+		}
 	}
 
 	// Summary on used space, total no of buckets and
@@ -374,7 +387,10 @@ func mainAdminInfo(ctx *cli.Context) error {
 	client, err := newAdminClient(aliasedURL)
 	fatalIf(err, "Unable to initialize admin connection.")
 
-	var clusterInfo clusterStruct
+	clusterInfo := clusterStruct{
+		onlyOffline: ctx.Bool("offline"),
+	}
+
 	// Fetch info of all servers (cluster or single server)
 	admInfo, e := client.ServerInfo(globalContext)
 	if e != nil {
@@ -384,6 +400,7 @@ func mainAdminInfo(ctx *cli.Context) error {
 		clusterInfo.Status = "success"
 		clusterInfo.Error = ""
 	}
+
 	clusterInfo.Info = admInfo
 	printMsg(clusterInfo)
 

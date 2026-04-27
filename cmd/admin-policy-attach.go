@@ -23,6 +23,10 @@ import (
 	"github.com/minio/mc/pkg/probe"
 )
 
+const (
+	errCodeChangeAlreadyApplied = "XMinioAdminPolicyChangeAlreadyApplied"
+)
+
 var adminAttachPolicyFlags = []cli.Flag{
 	cli.StringFlag{
 		Name:  "user, u",
@@ -97,10 +101,13 @@ func userAttachOrDetachPolicy(ctx *cli.Context, attach bool) error {
 	} else {
 		res, e = client.DetachPolicy(globalContext, req)
 	}
-	fatalIf(probe.NewError(e), "Unable to make user/group policy association")
+
+	if e != nil && madmin.ToErrorResponse(e).Code != errCodeChangeAlreadyApplied {
+		fatalIf(probe.NewError(e), "Unable to make user/group policy association")
+	}
 
 	var emptyResp madmin.PolicyAssociationResp
-	if res.UpdatedAt == emptyResp.UpdatedAt {
+	if res.UpdatedAt.Equal(emptyResp.UpdatedAt) {
 		// Older minio does not send a result, so we populate res manually to
 		// simulate a result. TODO(aditya): remove this after newer minio is
 		// released in a few months (Older API Deprecated in Jun 2023)

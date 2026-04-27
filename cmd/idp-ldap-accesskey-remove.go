@@ -18,10 +18,8 @@
 package cmd
 
 import (
-	"github.com/fatih/color"
 	"github.com/minio/cli"
 	"github.com/minio/mc/pkg/probe"
-	"github.com/minio/pkg/v3/console"
 )
 
 var idpLdapAccesskeyRemoveCmd = cli.Command{
@@ -48,11 +46,14 @@ EXAMPLES:
 }
 
 func mainIDPLdapAccesskeyRemove(ctx *cli.Context) error {
+	return commonAccesskeyRemove(ctx)
+}
+
+// No difference between ldap and builtin accesskey remove for now
+func commonAccesskeyRemove(ctx *cli.Context) error {
 	if len(ctx.Args()) != 2 {
 		showCommandHelpAndExit(ctx, 1) // last argument is exit code
 	}
-
-	console.SetColor("RemoveAccessKey", color.New(color.FgGreen))
 
 	args := ctx.Args()
 	aliasedURL := args.Get(0)
@@ -65,7 +66,7 @@ func mainIDPLdapAccesskeyRemove(ctx *cli.Context) error {
 	e := client.DeleteServiceAccount(globalContext, accessKey)
 	fatalIf(probe.NewError(e), "Unable to remove service account.")
 
-	m := ldapAccesskeyMessage{
+	m := accesskeyMessage{
 		op:        "remove",
 		Status:    "success",
 		AccessKey: accessKey,

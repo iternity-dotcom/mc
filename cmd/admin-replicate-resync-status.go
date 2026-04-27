@@ -60,12 +60,10 @@ EXAMPLES:
 }
 
 func mainAdminReplicationResyncStatus(ctx *cli.Context) error {
-	{
-		// Check argument count
-		argsNr := len(ctx.Args())
-		if argsNr != 2 {
-			cli.ShowCommandHelpAndExit(ctx, "status", 1) // last argument is exit code
-		}
+	// Check argument count
+	argsNr := len(ctx.Args())
+	if argsNr != 2 {
+		showCommandHelpAndExit(ctx, 1) // last argument is exit code
 	}
 
 	console.SetColor("ResyncMessage", color.New(color.FgGreen))
@@ -208,7 +206,7 @@ func (m *resyncMetricsUI) View() string {
 	table.SetNoWhiteSpace(true)
 
 	var data [][]string
-	addLine := func(prefix string, value interface{}) {
+	addLine := func(prefix string, value any) {
 		data = append(data, []string{
 			prefix,
 			whiteStyle.Render(fmt.Sprint(value)),

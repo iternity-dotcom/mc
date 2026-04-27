@@ -116,11 +116,11 @@ func (s anonymousRules) JSON() string {
 
 // anonymousMessage is container for anonymous command on bucket success and failure messages.
 type anonymousMessage struct {
-	Operation string                 `json:"operation"`
-	Status    string                 `json:"status"`
-	Bucket    string                 `json:"bucket"`
-	Perms     accessPerms            `json:"permission"`
-	Anonymous map[string]interface{} `json:"anonymous,omitempty"`
+	Operation string         `json:"operation"`
+	Status    string         `json:"status"`
+	Bucket    string         `json:"bucket"`
+	Perms     accessPerms    `json:"permission"`
+	Anonymous map[string]any `json:"anonymous,omitempty"`
 }
 
 // String colorized access message.
@@ -406,7 +406,7 @@ func runAnonymousLinksCmd(args cli.Args, recursive bool) {
 
 			// Encode public URL
 			u, e := url.Parse(content.URL.String())
-			errorIf(probe.NewError(e), "Unable to parse url `"+content.URL.String()+"`.")
+			errorIf(probe.NewError(e), "Unable to parse url `%s`.", content.URL)
 			publicURL := u.String()
 
 			// Construct the message to be displayed to the user
@@ -464,7 +464,7 @@ func runAnonymousCmd(args cli.Args) {
 				"Unable to "+operation+" anonymous `"+string(perms)+"` for `"+targetURL+"`.")
 		}
 	}
-	anonymousJSON := map[string]interface{}{}
+	anonymousJSON := map[string]any{}
 	if anonymousStr != "" {
 		e := json.Unmarshal([]byte(anonymousStr), &anonymousJSON)
 		fatalIf(probe.NewError(e), "Unable to unmarshal custom anonymous file.")

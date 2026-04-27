@@ -115,7 +115,7 @@ func validateClusterRegistered(alias string, cmdTalksToSubnet bool) string {
 	// command talks to subnet: dev+airgapped mode (both `--dev` and `--airgap` passed)
 	requireRegistration := !GlobalDevMode
 	if cmdTalksToSubnet {
-		requireRegistration = !(GlobalDevMode && globalAirgapped)
+		requireRegistration = !GlobalDevMode || !globalAirgapped
 	}
 
 	apiKey, e := getSubnetAPIKey(alias)
@@ -173,7 +173,7 @@ func isFeatureEnabled(alias, subSys, target string) bool {
 	return false
 }
 
-func toJSON(obj interface{}) string {
+func toJSON(obj any) string {
 	jsonBytes, e := json.MarshalIndent(obj, "", " ")
 	fatalIf(probe.NewError(e), "Unable to marshal into JSON.")
 

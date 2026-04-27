@@ -42,7 +42,7 @@ import (
 	"github.com/minio/mc/pkg/probe"
 )
 
-func marshalPublicKey(pub interface{}) (publicKeyBytes []byte, e error) {
+func marshalPublicKey(pub any) (publicKeyBytes []byte, e error) {
 	// pkcs1PublicKey reflects the ASN.1 structure of a PKCS #1 public key.
 	type pkcs1PublicKey struct {
 		N *big.Int
@@ -93,9 +93,9 @@ func promptTrustSelfSignedCert(ctx context.Context, endpoint, alias string) (*x5
 	client := http.Client{
 		Transport: &http.Transport{
 			Proxy: http.ProxyFromEnvironment,
-			TLSClientConfig: &tls.Config{
+			DialTLSContext: newCustomDialTLSContext(&tls.Config{
 				RootCAs: globalRootCAs, // make sure to use loaded certs before probing
-			},
+			}),
 		},
 	}
 
@@ -167,9 +167,9 @@ func fetchPeerCertificate(ctx context.Context, endpoint string) (*x509.Certifica
 	}
 	client := http.Client{
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
+			DialTLSContext: newCustomDialTLSContext(&tls.Config{
 				InsecureSkipVerify: true,
-			},
+			}),
 		},
 	}
 	resp, e := client.Do(req)

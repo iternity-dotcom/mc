@@ -35,6 +35,7 @@ import (
 
 	"github.com/inconshreveable/mousetrap"
 	"github.com/minio/cli"
+	"github.com/minio/madmin-go/v3"
 	"github.com/minio/mc/pkg/probe"
 	"github.com/minio/minio-go/v7/pkg/set"
 	"github.com/minio/pkg/v3/console"
@@ -397,7 +398,7 @@ func findClosestCommands(commandsTree *trie.Trie, command string) []string {
 // Check for updates and print a notification message
 func checkUpdate(ctx *cli.Context) {
 	// Do not print update messages, if quiet flag is set.
-	if ctx.Bool("quiet") || ctx.GlobalBool("quiet") {
+	if !ctx.Bool("quiet") && !ctx.GlobalBool("quiet") {
 		// Its OK to ignore any errors during doUpdate() here.
 		if updateMsg, _, currentReleaseTime, latestReleaseTime, _, err := getUpdateInfo("", 2*time.Second); err == nil {
 			printMsg(updateMessage{
@@ -420,7 +421,7 @@ var appCmds = []cli.Command{
 	batchCmd,
 	cpCmd,
 	catCmd,
-	configCmd,
+	corsCmd,
 	diffCmd,
 	duCmd,
 	encryptCmd,
@@ -478,7 +479,10 @@ func registerApp(name string) *cli.App {
 	app := cli.NewApp()
 	app.Name = name
 	app.Action = func(ctx *cli.Context) error {
-		if strings.HasPrefix(ReleaseTag, "RELEASE.") {
+		mcEnable := env.Get("MC_UPDATE", madmin.EnableOn)
+		minioEnable := env.Get("MINIO_UPDATE", madmin.EnableOn)
+
+		if strings.HasPrefix(ReleaseTag, "RELEASE.") && (mcEnable == madmin.EnableOn || minioEnable == madmin.EnableOn) {
 			// Check for new updates from dl.min.io.
 			checkUpdate(ctx)
 		}
@@ -507,6 +511,17 @@ func registerApp(name string) *cli.App {
 	app.CustomAppHelpTemplate = mcHelpTemplate
 	app.EnableBashCompletion = true
 	app.OnUsageError = onUsageError
+	app.After = func(*cli.Context) error {
+		globalExpiringCerts.Range(func(k, v any) bool {
+			host := k.(string)
+			expires := v.(time.Time)
+			fmt.Fprintf(os.Stderr, "\n")
+			fmt.Fprintf(os.Stderr, "== WARN: `%s` certificate will expire in %s. Renew soon to avoid outage.\n", host, expires)
+			fmt.Fprintf(os.Stderr, "\n")
+			return true
+		})
+		return nil
+	}
 
 	if isTerminal() && !globalPagerDisabled {
 		app.HelpWriter = globalHelpPager

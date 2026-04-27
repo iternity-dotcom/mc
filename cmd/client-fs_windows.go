@@ -1,5 +1,4 @@
 //go:build windows
-// +build windows
 
 // Copyright (c) 2015-2021 MinIO, Inc.
 //
@@ -56,6 +55,6 @@ func IsDeleteEvent(event notify.Event) bool {
 
 // getAllXattrs returns the extended attributes for a file if supported
 // by the OS
-func getAllXattrs(path string) (map[string]string, error) {
+func getAllXattrs(_ string) (map[string]string, error) {
 	return nil, nil
 }

@@ -25,6 +25,10 @@ var idpLdapAccesskeySubcommands = []cli.Command{
 	idpLdapAccesskeyInfoCmd,
 	idpLdapAccesskeyCreateCmd,
 	idpLdapAccesskeyCreateWithLoginCmd,
+	idpLdapAccesskeyEditCmd,
+	idpLdapAccesskeyEnableCmd,
+	idpLdapAccesskeyDisableCmd,
+	idpLdapAccesskeySTSRevokeCmd,
 }
 
 var idpLdapAccesskeyCmd = cli.Command{

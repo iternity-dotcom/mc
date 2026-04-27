@@ -41,8 +41,11 @@ var errInvalidArgument = func() *probe.Error {
 
 type unableToGuessErr error
 
-var errUnableToGuess = func() *probe.Error {
+var errUnableToGuess = func(customMsg string) *probe.Error {
 	msg := "Unable to guess the type of copy operation."
+	if strings.TrimSpace(customMsg) != "" {
+		msg = customMsg
+	}
 	return probe.NewError(unableToGuessErr(errors.New(msg)))
 }
 
@@ -187,7 +190,7 @@ var errSSEKMSKeyFormat = func(msg string) *probe.Error {
 type sseClientKeyFormatErr error
 
 var errSSEClientKeyFormat = func(msg string) *probe.Error {
-	m := "Encryption key should be 44 bytes raw base64 encoded key."
+	m := "Encryption key should be either raw base64 encoded or hex encoded. "
 	m += msg
 	return probe.NewError(sseClientKeyFormatErr(errors.New(m))).Untrace()
 }

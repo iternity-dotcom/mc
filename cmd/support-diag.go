@@ -123,7 +123,7 @@ func checkSupportDiagSyntax(ctx *cli.Context) {
 }
 
 // compress and tar MinIO diagnostics output
-func tarGZ(healthInfo interface{}, version, filename string) error {
+func tarGZ(healthInfo any, version, filename string) error {
 	data, e := TarGZHealthInfo(healthInfo, version)
 	if e != nil {
 		return e
@@ -150,7 +150,7 @@ func tarGZ(healthInfo interface{}, version, filename string) error {
 }
 
 // TarGZHealthInfo - compress and tar MinIO diagnostics output
-func TarGZHealthInfo(healthInfo interface{}, version string) ([]byte, error) {
+func TarGZHealthInfo(healthInfo any, version string) ([]byte, error) {
 	buffer := bytes.NewBuffer(nil)
 	gzWriter := gzip.NewWriter(buffer)
 
@@ -255,7 +255,7 @@ func execSupportDiag(ctx *cli.Context, client *madmin.AdminClient, alias, apiKey
 	}
 }
 
-func fetchServerDiagInfo(ctx *cli.Context, client *madmin.AdminClient) (interface{}, string, error) {
+func fetchServerDiagInfo(ctx *cli.Context, client *madmin.AdminClient) (any, string, error) {
 	opts := GetHealthDataTypeSlice(ctx, "test")
 	if len(*opts) == 0 {
 		opts = &options
@@ -344,7 +344,7 @@ func fetchServerDiagInfo(ctx *cli.Context, client *madmin.AdminClient) (interfac
 	diskHw := spinner("Disk Info", madmin.HealthDataTypeSysDriveHw)
 	osInfo := spinner("OS Info", madmin.HealthDataTypeSysOsInfo)
 	mem := spinner("Mem Info", madmin.HealthDataTypeSysMem)
-	process := spinner("Process Info", madmin.HealthDataTypeSysLoad)
+	process := spinner("Process Info", madmin.HealthDataTypeSysProcess)
 	config := spinner("Server Config", madmin.HealthDataTypeMinioConfig)
 	syserr := spinner("System Errors", madmin.HealthDataTypeSysErrors)
 	syssrv := spinner("System Services", madmin.HealthDataTypeSysServices)
@@ -380,7 +380,7 @@ func fetchServerDiagInfo(ctx *cli.Context, client *madmin.AdminClient) (interfac
 		return nil, "", e
 	}
 
-	var healthInfo interface{}
+	var healthInfo any
 
 	decoder := json.NewDecoder(resp.Body)
 	switch version {
@@ -468,7 +468,7 @@ func (d *HealthDataTypeSlice) Value() []madmin.HealthDataType {
 }
 
 // Get - returns the value
-func (d *HealthDataTypeSlice) Get() interface{} {
+func (d *HealthDataTypeSlice) Get() any {
 	return *d
 }
 

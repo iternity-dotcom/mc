@@ -360,21 +360,21 @@ var (
 		return isatty.IsTerminal(os.Stdout.Fd()) && isatty.IsTerminal(os.Stderr.Fd())
 	}
 
-	colorCyanBold = func() func(a ...interface{}) string {
+	colorCyanBold = func() func(a ...any) string {
 		if isTerminal() {
 			color.New(color.FgCyan, color.Bold).SprintFunc()
 		}
 		return fmt.Sprint
 	}()
 
-	colorYellowBold = func() func(format string, a ...interface{}) string {
+	colorYellowBold = func() func(format string, a ...any) string {
 		if isTerminal() {
 			return color.New(color.FgYellow, color.Bold).SprintfFunc()
 		}
 		return fmt.Sprintf
 	}()
 
-	colorGreenBold = func() func(format string, a ...interface{}) string {
+	colorGreenBold = func() func(format string, a ...any) string {
 		if isTerminal() {
 			return color.New(color.FgGreen, color.Bold).SprintfFunc()
 		}
@@ -437,7 +437,7 @@ func doUpdate(customReleaseURL, sha256Hex string, latestReleaseTime time.Time, r
 	}
 
 	u, e := url.Parse(getDownloadURL(customReleaseURL, releaseTag))
-	if err != nil {
+	if e != nil {
 		return updateStatusMsg, probe.NewError(e)
 	}
 

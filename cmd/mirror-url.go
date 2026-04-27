@@ -22,10 +22,12 @@ import (
 	"fmt"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/minio/cli"
+	"github.com/minio/minio-go/v7"
 	"github.com/minio/pkg/v3/wildcard"
 )
 
@@ -39,6 +41,7 @@ func checkMirrorSyntax(ctx context.Context, cliCtx *cli.Context, encKeyDB map[st
 	if len(cliCtx.Args()) != 2 {
 		showCommandHelpAndExit(cliCtx, 1) // last argument is exit code.
 	}
+	parseChecksum(cliCtx)
 
 	// extract URLs.
 	URLs := cliCtx.Args()
@@ -165,7 +168,7 @@ func deltaSourceTarget(ctx context.Context, sourceURL, targetURL string, opts mi
 	}
 
 	// List both source and target, compare and return values through channel.
-	for diffMsg := range objectDifference(ctx, sourceClnt, targetClnt, opts.isMetadata) {
+	for diffMsg := range objectDifference(ctx, sourceClnt, targetClnt, opts) {
 		if diffMsg.Error != nil {
 			// Send all errors through the channel
 			URLsCh <- URLs{Error: diffMsg.Error, ErrorCond: differInUnknown}
@@ -196,11 +199,8 @@ func deltaSourceTarget(ctx context.Context, sourceURL, targetURL string, opts mi
 
 		if diffMsg.firstContent != nil {
 			var found bool
-			for _, esc := range opts.excludeStorageClasses {
-				if esc == diffMsg.firstContent.StorageClass {
-					found = true
-					break
-				}
+			if slices.Contains(opts.excludeStorageClasses, diffMsg.firstContent.StorageClass) {
+				found = true
 			}
 			if found {
 				continue
@@ -274,6 +274,9 @@ type mirrorOptions struct {
 	olderThan, newerThan                                  string
 	storageClass                                          string
 	userMetadata                                          map[string]string
+	checksum                                              minio.ChecksumType
+	sourceListingOnly                                     bool
+	maxWorkers                                            int
 }
 
 // Prepares urls that need to be copied or removed based on requested options.

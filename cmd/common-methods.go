@@ -21,10 +21,12 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -35,6 +37,7 @@ import (
 	"github.com/minio/mc/pkg/probe"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/encrypt"
+	"github.com/minio/minio-go/v7/pkg/tags"
 	"github.com/minio/pkg/v3/env"
 )
 
@@ -134,15 +137,12 @@ func isReadAt(reader io.Reader) (ok bool) {
 		// which happen to also be io.ReaderAt compatible
 		// we need to add special conditions for them to
 		// be ignored by this function.
-		for _, f := range []string{
+		if slices.Contains([]string{
 			"/dev/stdin",
 			"/dev/stdout",
 			"/dev/stderr",
-		} {
-			if f == v.Name() {
-				ok = false
-				break
-			}
+		}, v.Name()) {
+			ok = false
 		}
 	}
 	return
@@ -353,16 +353,14 @@ func uploadSourceToTargetURL(ctx context.Context, uploadOpts uploadSourceToTarge
 	}
 
 	// Optimize for server side copy if the host is same.
-	if sourceAlias == targetAlias && !uploadOpts.isZip {
+	if sourceAlias == targetAlias && !uploadOpts.isZip && !uploadOpts.urls.checksum.IsSet() {
 		// preserve new metadata and save existing ones.
 		if uploadOpts.preserve {
 			currentMetadata, err := getAllMetadata(ctx, sourceAlias, sourceURL.String(), srcSSE, uploadOpts.urls)
 			if err != nil {
 				return uploadOpts.urls.WithError(err.Trace(sourceURL.String()))
 			}
-			for k, v := range currentMetadata {
-				metadata[k] = v
-			}
+			maps.Copy(metadata, currentMetadata)
 		}
 
 		// Get metadata from target content as well
@@ -400,9 +398,7 @@ func uploadSourceToTargetURL(ctx context.Context, uploadOpts uploadSourceToTarge
 				if err != nil {
 					return uploadOpts.urls.WithError(err.Trace(sourceURL.String()))
 				}
-				for k, v := range currentMetadata {
-					metadata[k] = v
-				}
+				maps.Copy(metadata, currentMetadata)
 			}
 
 			// Get metadata from target content as well
@@ -446,9 +442,7 @@ func uploadSourceToTargetURL(ctx context.Context, uploadOpts uploadSourceToTarge
 		}
 
 		metadata := make(map[string]string, len(content.Metadata))
-		for k, v := range content.Metadata {
-			metadata[k] = v
-		}
+		maps.Copy(metadata, content.Metadata)
 
 		// Get metadata from target content as well
 		for k, v := range uploadOpts.urls.TargetContent.Metadata {
@@ -458,6 +452,15 @@ func uploadSourceToTargetURL(ctx context.Context, uploadOpts uploadSourceToTarge
 		// Get userMetadata from target content as well
 		for k, v := range uploadOpts.urls.TargetContent.UserMetadata {
 			metadata[http.CanonicalHeaderKey(k)] = v
+		}
+
+		if content.Tags != nil {
+			tags, err := tags.NewTags(content.Tags, true)
+			if err != nil {
+				return uploadOpts.urls.WithError(probe.NewError(err))
+			}
+			metadata["X-Amz-Tagging"] = tags.String()
+			delete(metadata, "X-Amz-Tagging-Count")
 		}
 
 		var e error
@@ -494,6 +497,8 @@ func uploadSourceToTargetURL(ctx context.Context, uploadOpts uploadSourceToTarge
 			isPreserve:       uploadOpts.preserve,
 			multipartSize:    multipartSize,
 			multipartThreads: uint(multipartThreads),
+			ifNotExists:      uploadOpts.ifNotExists,
+			checksum:         uploadOpts.urls.checksum,
 		}
 
 		if isReadAt(reader) || length == 0 {
@@ -576,4 +581,5 @@ type uploadSourceToTargetURLOpts struct {
 	multipartSize       string
 	multipartThreads    string
 	updateProgressTotal bool
+	ifNotExists         bool
 }

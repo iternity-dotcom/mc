@@ -65,10 +65,6 @@ func subnetIssueURL(issueNum int) string {
 	return fmt.Sprintf("%s/issues/%d", SubnetBaseURL(), issueNum)
 }
 
-func subnetLogWebhookURL() string {
-	return SubnetBaseURL() + "/api/logs"
-}
-
 // SubnetUploadURL - returns the upload URL for the given upload type
 func SubnetUploadURL(uploadType string) string {
 	return fmt.Sprintf("%s/api/%s/upload", SubnetBaseURL(), uploadType)
@@ -260,7 +256,7 @@ func subnetGetReq(reqURL string, headers map[string]string) (string, error) {
 }
 
 // SubnetPostReq - makes a POST request to SUBNET
-func SubnetPostReq(reqURL string, payload interface{}, headers map[string]string) (string, error) {
+func SubnetPostReq(reqURL string, payload any, headers map[string]string) (string, error) {
 	body, e := json.Marshal(payload)
 	if e != nil {
 		return "", e

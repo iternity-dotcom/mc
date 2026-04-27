@@ -28,6 +28,7 @@ var (
 		idpOpenidInfoCmd,
 		idpOpenidEnableCmd,
 		idpOpenidDisableCmd,
+		idpOpenIDAccesskeyCmd,
 		// TODO: idpOpenidPolicyCmd,
 	}
 	idpOpenidCmd = cli.Command{

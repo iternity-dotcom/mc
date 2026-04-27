@@ -113,7 +113,7 @@ func (m replicateMRFMessage) String() string {
 		Field{getNodeTheme(m.ReplicationMRF.NodeName), len(m.ReplicationMRF.NodeName) + 3},
 		Field{"Count", 7},
 		Field{"Object", -1},
-	).buildRow(m.ReplicationMRF.NodeName, fmt.Sprintf("Retry=%d", m.ReplicationMRF.RetryCount), fmt.Sprintf("%s (%s)", m.ReplicationMRF.Object, m.ReplicationMRF.VersionID)))
+	).buildRow(m.NodeName, fmt.Sprintf("Retry=%d", m.RetryCount), fmt.Sprintf("%s (%s)", m.Object, m.VersionID)))
 }
 
 type replicateBacklogMessage struct {
@@ -215,7 +215,7 @@ func (r *replicateBacklogMessage) replStatus() string {
 
 type replicateBacklogUI struct {
 	spinner  spinner.Model
-	sub      interface{}
+	sub      any
 	diffCh   chan madmin.DiffInfo
 	mrfCh    chan madmin.ReplicationMRF
 	arn      string
@@ -255,7 +255,7 @@ func newKeyMap() keyMap {
 	}
 }
 
-func initReplicateBacklogUI(arn, op string, diffCh interface{}) *replicateBacklogUI {
+func initReplicateBacklogUI(arn, op string, diffCh any) *replicateBacklogUI {
 	s := spinner.New()
 	s.Spinner = spinner.Points
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
@@ -298,7 +298,7 @@ func (m *replicateBacklogUI) Init() tea.Cmd {
 const rowLimit = 10000
 
 // A command that waits for the activity on a channel.
-func waitForActivity(sub interface{}, op string) tea.Cmd {
+func waitForActivity(sub any, op string) tea.Cmd {
 	return func() tea.Msg {
 		switch op {
 		case "diff":
@@ -519,7 +519,7 @@ func mainReplicateBacklog(cliCtx *cli.Context) error {
 	// Create a new MinIO Admin Client
 	client, cerr := newAdminClient(aliasedURL)
 	fatalIf(cerr, "Unable to initialize admin connection.")
-	if !cliCtx.IsSet("full") {
+	if !cliCtx.Bool("full") {
 		mrfCh := client.BucketReplicationMRF(ctx, bucket, cliCtx.String("nodes"))
 		if globalJSON {
 			for mrf := range mrfCh {

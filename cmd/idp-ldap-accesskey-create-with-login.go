@@ -20,8 +20,10 @@ package cmd
 import (
 	"bufio"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
+	"slices"
 
 	"github.com/fatih/color"
 	"github.com/minio/cli"
@@ -32,12 +34,23 @@ import (
 	"golang.org/x/term"
 )
 
+var idpLdapAccesskeyCreateWithLoginFlags = []cli.Flag{
+	cli.StringFlag{
+		Name:  "ldap-username",
+		Usage: "username to login as (prompt if empty)",
+	},
+	cli.StringFlag{
+		Name:  "ldap-password",
+		Usage: "password for ldap-user (prompt if empty)",
+	},
+}
+
 var idpLdapAccesskeyCreateWithLoginCmd = cli.Command{
 	Name:         "create-with-login",
 	Usage:        "login using LDAP credentials to generate access key pair",
 	Action:       mainIDPLdapAccesskeyCreateWithLogin,
 	Before:       setGlobalsFromContext,
-	Flags:        append(idpLdapAccesskeyCreateFlags, globalFlags...),
+	Flags:        slices.Concat(idpLdapAccesskeyCreateWithLoginFlags, idpLdapAccesskeyCreateFlags, globalFlags),
 	OnUsageError: onUsageError,
 	CustomHelpTemplate: `NAME:
   {{.HelpName}} - {{.Usage}}
@@ -73,7 +86,7 @@ func mainIDPLdapAccesskeyCreateWithLogin(ctx *cli.Context) error {
 	res, e := client.AddServiceAccountLDAP(globalContext, opts)
 	fatalIf(probe.NewError(e), "unable to add service account")
 
-	m := ldapAccesskeyMessage{
+	m := accesskeyMessage{
 		op:          "create",
 		Status:      "success",
 		AccessKey:   res.AccessKey,
@@ -90,25 +103,36 @@ func mainIDPLdapAccesskeyCreateWithLogin(ctx *cli.Context) error {
 func loginLDAPAccesskey(ctx *cli.Context) (*madmin.AdminClient, madmin.AddServiceAccountReq) {
 	urlStr := ctx.Args().First()
 
+	u, e := url.Parse(urlStr)
+	fatalIf(probe.NewError(e), "unable to parse server URL")
+
 	console.SetColor(cred, color.New(color.FgYellow, color.Italic))
 	reader := bufio.NewReader(os.Stdin)
 
-	fmt.Printf("%s", console.Colorize(cred, "Enter LDAP Username: "))
-	value, _, e := reader.ReadLine()
-	fatalIf(probe.NewError(e), "unable to read username")
-	username := string(value)
+	username := ctx.String("ldap-username")
+	if username == "" {
+		fmt.Printf("%s", console.Colorize(cred, "Enter LDAP Username: "))
+		value, _, e := reader.ReadLine()
+		fatalIf(probe.NewError(e), "unable to read username")
+		username = string(value)
+	}
 
-	fmt.Printf("%s", console.Colorize(cred, "Enter LDAP Password: "))
-	bytePassword, e := term.ReadPassword(int(os.Stdin.Fd()))
-	fatalIf(probe.NewError(e), "unable to read password")
-	fmt.Printf("\n")
-	password := string(bytePassword)
+	password := ctx.String("ldap-password")
+	if password == "" {
+		fmt.Printf("%s", console.Colorize(cred, "Enter LDAP Password: "))
+		bytePassword, e := term.ReadPassword(int(os.Stdin.Fd()))
+		fatalIf(probe.NewError(e), "unable to read password")
+		fmt.Printf("\n")
+		password = string(bytePassword)
+	}
 
 	stsCreds, e := credentials.NewLDAPIdentity(urlStr, username, password)
 	fatalIf(probe.NewError(e), "unable to initialize LDAP identity")
 
-	u, e := url.Parse(urlStr)
-	fatalIf(probe.NewError(e), "unable to parse server URL")
+	tempCreds, e := stsCreds.GetWithContext(&credentials.CredContext{
+		Client: http.DefaultClient,
+	})
+	fatalIf(probe.NewError(e), "unable to create a temporary account from LDAP identity")
 
 	client, e := madmin.NewWithOptions(u.Host, &madmin.Options{
 		Creds:  stsCreds,
@@ -116,5 +140,5 @@ func loginLDAPAccesskey(ctx *cli.Context) (*madmin.AdminClient, madmin.AddServic
 	})
 	fatalIf(probe.NewError(e), "unable to initialize admin connection")
 
-	return client, accessKeyCreateOpts(ctx, username)
+	return client, accessKeyCreateOpts(ctx, tempCreds.AccessKeyID)
 }

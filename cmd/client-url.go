@@ -50,6 +50,7 @@ type url2StatOptions struct {
 	encKeyDB                map[string][]prefixSSEPair
 	timeRef                 time.Time
 	isZip                   bool
+	headOnly                bool
 	ignoreBucketExistsCheck bool
 }
 
@@ -204,7 +205,15 @@ func url2Stat(ctx context.Context, opts url2StatOptions) (client Client, content
 	alias, _ := url2Alias(opts.urlStr)
 	sse := getSSE(opts.urlStr, opts.encKeyDB[alias])
 
-	content, err = client.Stat(ctx, StatOptions{preserve: opts.fileAttr, sse: sse, timeRef: opts.timeRef, versionID: opts.versionID, isZip: opts.isZip, ignoreBucketExists: opts.ignoreBucketExistsCheck})
+	content, err = client.Stat(ctx, StatOptions{
+		preserve:           opts.fileAttr,
+		sse:                sse,
+		timeRef:            opts.timeRef,
+		versionID:          opts.versionID,
+		isZip:              opts.isZip,
+		ignoreBucketExists: opts.ignoreBucketExistsCheck,
+		headOnly:           opts.headOnly,
+	})
 	if err != nil {
 		return nil, nil, err.Trace(opts.urlStr)
 	}
@@ -257,4 +266,38 @@ func guessURLContentType(urlStr string) string {
 	url := newClientURL(urlStr)
 	contentType := mimedb.TypeByExtension(filepath.Ext(url.Path))
 	return contentType
+}
+
+// urlParts - split URL into parts.
+func urlParts(urlStr string) []string {
+	// Convert '/' on windows to filepath.Separator.
+	urlStr = filepath.FromSlash(urlStr)
+
+	if runtime.GOOS == "windows" {
+		// Remove '/' prefix before alias if any to support '\\home' alias
+		// style under Windows
+		urlStr = strings.TrimPrefix(urlStr, string(filepath.Separator))
+	}
+
+	// Remove everything after alias (i.e. after '/').
+	return strings.Split(urlStr, string(filepath.Separator))
+}
+
+// isURLPrefix - check if source and destination be subdirectories of each other
+func isURLPrefix(src string, dest string) bool {
+	srcURLParts := urlParts(src)
+	dstURLParts := urlParts(dest)
+	minIndex := min(len(srcURLParts), len(dstURLParts))
+	isPrefix := true
+	for i := range minIndex {
+		// if one of the URLs ends with '/' and other does not
+		if (i == minIndex-1) && (dstURLParts[i] == "" || srcURLParts[i] == "" || dstURLParts[i] == "*" || srcURLParts[i] == "*") {
+			continue
+		}
+		if srcURLParts[i] != dstURLParts[i] {
+			isPrefix = false
+			break
+		}
+	}
+	return isPrefix
 }

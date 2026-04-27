@@ -31,6 +31,7 @@ import (
 // put command flags.
 var (
 	putFlags = []cli.Flag{
+		checksumFlag,
 		cli.IntFlag{
 			Name:  "parallel, P",
 			Usage: "upload number of parts in parallel",
@@ -40,6 +41,19 @@ var (
 			Name:  "part-size, s",
 			Usage: "each part size",
 			Value: "16MiB",
+		},
+		cli.BoolFlag{
+			Name:   "if-not-exists",
+			Usage:  "upload only if object does not exist",
+			Hidden: true,
+		},
+		cli.BoolFlag{
+			Name:  "disable-multipart",
+			Usage: "disable multipart upload feature",
+		},
+		cli.StringFlag{
+			Name:  "storage-class, sc",
+			Usage: "set storage class for new object on target",
 		},
 	}
 )
@@ -68,19 +82,22 @@ ENVIRONMENT VARIABLES:
 
 EXAMPLES:
   1. Put an object from local file system to S3 storage
-		{{.Prompt}} {{.HelpName}} path-to/object play/mybucket
+     {{.Prompt}} {{.HelpName}} path-to/object play/mybucket
 
   2. Put an object from local file system to S3 bucket with name
-		{{.Prompt}} {{.HelpName}} path-to/object play/mybucket/object
+     {{.Prompt}} {{.HelpName}} path-to/object play/mybucket/object
 
   3. Put an object from local file system to S3 bucket under a prefix
-		{{.Prompt}} {{.HelpName}} path-to/object play/mybucket/object-prefix/
+     {{.Prompt}} {{.HelpName}} path-to/object play/mybucket/object-prefix/
 
-	4. Put an object to MinIO storage using sse-c encryption
-		{{.Prompt}} {{.HelpName}} --enc-c "play/mybucket/object=MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDA" path-to/object play/mybucket/object 
+  4. Put an object to MinIO storage using sse-c encryption
+     {{.Prompt}} {{.HelpName}} --enc-c "play/mybucket/object=MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDA" path-to/object play/mybucket/object 
 
-	5. Put an object to MinIO storage using sse-kms encryption
-		{{.Prompt}} {{.HelpName}} --enc-kms path-to/object play/mybucket/object 
+  5. Put an object to MinIO storage using sse-kms encryption
+     {{.Prompt}} {{.HelpName}} --enc-kms path-to/object play/mybucket/object
+
+  6. Put an object to MinIO storage and assign REDUCED_REDUNDANCY storage-class to the uploaded object.
+      {{.Prompt}} {{.HelpName}} --storage-class REDUCED_REDUNDANCY myobject.txt play/mybucket
 `,
 }
 
@@ -93,11 +110,13 @@ func mainPut(cliCtx *cli.Context) (e error) {
 
 	ctx, cancelPut := context.WithCancel(globalContext)
 	defer cancelPut()
+
 	// part size
 	size := cliCtx.String("s")
 	if size == "" {
-		size = "16mb"
+		size = "32MiB"
 	}
+
 	_, perr := humanize.ParseBytes(size)
 	if perr != nil {
 		fatalIf(probe.NewError(perr), "Unable to parse part size")
@@ -108,16 +127,23 @@ func mainPut(cliCtx *cli.Context) (e error) {
 		fatalIf(errInvalidArgument().Trace(strconv.Itoa(threads)), "Invalid number of threads")
 	}
 
+	disableMultipart := cliCtx.Bool("disable-multipart")
+
 	// Parse encryption keys per command.
 	encryptionKeys, err := validateAndCreateEncryptionKeys(cliCtx)
 	if err != nil {
 		err.Trace(cliCtx.Args()...)
 	}
 	fatalIf(err, "SSE Error")
+	md5, checksum := parseChecksum(cliCtx)
 
 	if len(args) < 2 {
 		fatalIf(errInvalidArgument().Trace(args...), "Invalid number of arguments.")
 	}
+
+	// Check and handle storage class if passed in command line args
+	storageClass := cliCtx.String("sc")
+
 	// get source and target
 	sourceURLs := args[:len(args)-1]
 	targetURL := args[len(args)-1]
@@ -147,9 +173,15 @@ func mainPut(cliCtx *cli.Context) (e error) {
 				putURLsCh <- putURLs
 				break
 			}
+			if storageClass != "" {
+				putURLs.TargetContent.StorageClass = storageClass
+			}
+			putURLs.checksum = checksum
+			putURLs.MD5 = md5
 			totalBytes += putURLs.SourceContent.Size
 			pg.SetTotal(totalBytes)
 			totalObjects++
+			putURLs.DisableMultipart = disableMultipart
 			putURLsCh <- putURLs
 		}
 		close(putURLsCh)
@@ -175,10 +207,11 @@ func mainPut(cliCtx *cli.Context) (e error) {
 				encryptionKeys:   encryptionKeys,
 				multipartSize:    size,
 				multipartThreads: strconv.Itoa(threads),
+				ifNotExists:      cliCtx.Bool("if-not-exists"),
 			})
 			if urls.Error != nil {
-				e = urls.Error.ToGoError()
-				showLastProgressBar(pg, e)
+				showLastProgressBar(pg, urls.Error.ToGoError())
+				fatalIf(urls.Error.Trace(), "unable to upload")
 				return
 			}
 		}

@@ -21,9 +21,14 @@ package cmd
 import (
 	"context"
 	"crypto/x509"
+	"fmt"
+	"net"
+	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
@@ -32,6 +37,7 @@ import (
 	"github.com/minio/madmin-go/v3"
 	"github.com/minio/pkg/v3/console"
 	"github.com/muesli/termenv"
+	"golang.org/x/net/http/httpguts"
 )
 
 const (
@@ -69,11 +75,15 @@ var (
 	globalDebug        = false               // Debug flag set via command line
 	globalNoColor      = false               // No Color flag set via command line
 	globalInsecure     = false               // Insecure flag set via command line
+	globalResolvers    map[string]netip.Addr // Custom mappings from HOST[:PORT] to IP
 	globalAirgapped    = false               // Airgapped flag set via command line
 	globalSubnetConfig []madmin.SubsysConfig // Subnet config
 
 	// GlobalDevMode is set to true if the program is running in development mode
 	GlobalDevMode = false
+
+	// GlobalTrapSignals is set to true if need to trap the registered signals and cancel the global context.
+	GlobalTrapSignals = true
 
 	// GlobalSubnetProxyURL is the proxy to be used for communication with subnet
 	GlobalSubnetProxyURL *url.URL
@@ -85,6 +95,8 @@ var (
 	globalLimitDownload uint64
 
 	globalContext, globalCancel = context.WithCancel(context.Background())
+
+	globalCustomHeader http.Header
 )
 
 var (
@@ -112,13 +124,13 @@ func parsePagerDisableFlag(args []string) {
 
 // Set global states. NOTE: It is deliberately kept monolithic to ensure we dont miss out any flags.
 func setGlobalsFromContext(ctx *cli.Context) error {
-	quiet := ctx.IsSet("quiet") || ctx.GlobalIsSet("quiet")
-	debug := ctx.IsSet("debug") || ctx.GlobalIsSet("debug")
-	json := ctx.IsSet("json") || ctx.GlobalIsSet("json")
-	noColor := ctx.IsSet("no-color") || ctx.GlobalIsSet("no-color")
-	insecure := ctx.IsSet("insecure") || ctx.GlobalIsSet("insecure")
-	devMode := ctx.IsSet("dev") || ctx.GlobalIsSet("dev")
-	airgapped := ctx.IsSet("airgap") || ctx.GlobalIsSet("airgap")
+	quiet := ctx.Bool("quiet") || ctx.GlobalBool("quiet")
+	debug := ctx.Bool("debug") || ctx.GlobalBool("debug")
+	json := ctx.Bool("json") || ctx.GlobalBool("json")
+	noColor := ctx.Bool("no-color") || ctx.GlobalBool("no-color")
+	insecure := ctx.Bool("insecure") || ctx.GlobalBool("insecure")
+	devMode := ctx.Bool("dev") || ctx.GlobalBool("dev")
+	airgapped := ctx.Bool("airgap") || ctx.GlobalBool("airgap")
 
 	globalQuiet = globalQuiet || quiet
 	globalDebug = globalDebug || debug
@@ -167,6 +179,49 @@ func setGlobalsFromContext(ctx *cli.Context) error {
 		globalLimitDownload, e = humanize.ParseBytes(limitDownloadStr)
 		if e != nil {
 			return e
+		}
+	}
+
+	dnsEntries := ctx.StringSlice("resolve")
+	if len(dnsEntries) > 0 {
+		globalResolvers = make(map[string]netip.Addr, len(dnsEntries))
+
+		// Each entry is a HOST[:PORT]=IP pair. This is very similar to cURL's syntax.
+		for _, e := range dnsEntries {
+			i := strings.IndexByte(e, '=')
+			if i < 0 {
+				return fmt.Errorf("invalid DNS resolve entry %s", e)
+			}
+
+			if strings.ContainsRune(e[:i], ':') {
+				if _, _, err := net.SplitHostPort(e[:i]); err != nil {
+					return fmt.Errorf("invalid DNS resolve entry %s: %v", e, err)
+				}
+			}
+
+			host := e[:i]
+			addr, err := netip.ParseAddr(e[i+1:])
+			if err != nil {
+				return fmt.Errorf("invalid DNS resolve entry %s: %v", e, err)
+			}
+			globalResolvers[host] = addr
+		}
+	}
+
+	customHeaders := ctx.StringSlice("custom-header")
+	if len(customHeaders) > 0 {
+		globalCustomHeader = make(http.Header)
+		for _, header := range customHeaders {
+			i := strings.IndexByte(header, ':')
+			if i <= 0 {
+				return fmt.Errorf("invalid custom header entry %s", header)
+			}
+			h := strings.TrimSpace(header[:i])
+			hv := strings.TrimSpace(header[i+1:])
+			if !httpguts.ValidHeaderFieldName(h) || !httpguts.ValidHeaderFieldValue(hv) {
+				return fmt.Errorf("invalid custom header entry %s", header)
+			}
+			globalCustomHeader.Add(h, hv)
 		}
 	}
 
